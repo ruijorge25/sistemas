@@ -72,6 +72,11 @@ class VehicleAgent(BaseTransportAgent):
         # Contract Net Protocol
         self.cnp_participant = ContractNetParticipant(self)
         
+        # Dynamic events
+        self.event_manager = None  # Will be set by coordinator
+        self.traffic_modifier = 1.0
+        self.route_adaptations = 0
+        
     async def setup(self):
         """Setup vehicle-specific behaviours"""
         await super().setup()
@@ -88,10 +93,24 @@ class VehicleAgent(BaseTransportAgent):
         self.add_behaviour(self.ContractNetHandler())
         
     class MovementBehaviour(BaseTransportAgent.MessageReceiver):
-        """Handle vehicle movement along routes"""
+        """Handle vehicle movement along routes - REACTS TO TRAFFIC"""
         
         async def run(self):
-            await asyncio.sleep(SIMULATION_CONFIG['simulation']['time_step'])
+            # Check for traffic/weather events affecting speed
+            if self.agent.event_manager:
+                pos = (self.agent.current_position.x, self.agent.current_position.y)
+                self.agent.traffic_modifier = self.agent.event_manager.get_traffic_modifier(pos)
+                
+                # Check if route is blocked
+                if self.agent.event_manager.is_route_blocked(pos):
+                    print(f"🚧 Vehicle {self.agent.vehicle_id} route blocked! Rerouting...")
+                    await self.agent.find_alternative_route()
+                    self.agent.route_adaptations += 1
+            
+            # Adjust sleep based on traffic modifier
+            base_time = SIMULATION_CONFIG['simulation']['time_step']
+            adjusted_time = base_time / max(0.3, self.agent.traffic_modifier)
+            await asyncio.sleep(adjusted_time)
             
             if not self.agent.is_broken and self.agent.next_station:
                 await self.agent.move_towards_next_station()
@@ -416,3 +435,19 @@ class VehicleAgent(BaseTransportAgent):
         )
         
         print(f"✅ {self.vehicle_id} will arrive at station {task['station_id']} for contract {contract_id}")
+    
+    async def find_alternative_route(self):
+        """Find alternative route when current route is blocked by accident/event"""
+        if not self.next_station or not self.assigned_route:
+            return
+        
+        # Find alternative station to reach
+        current_idx = self.current_station_index
+        target_idx = min(current_idx + 2, len(self.assigned_route.stations) - 1)
+        
+        if target_idx > current_idx:
+            # Skip blocked station
+            self.current_station_index = target_idx
+            self.next_station = self.assigned_route.stations[target_idx]
+            print(f"🔄 {self.vehicle_id} rerouted to station {target_idx}")
+            self.route_adaptations += 1

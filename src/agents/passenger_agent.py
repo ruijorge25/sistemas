@@ -96,7 +96,7 @@ class PassengerAgent(BaseTransportAgent):
                 await self.agent.check_arrival()
     
     async def discover_routes(self):
-        """Discover available vehicles and routes"""
+        """Discover available vehicles and routes - ACTIVELY compare multiple options"""
         # Find nearest station to origin
         origin_station = self.city.get_nearest_station(self.origin)
         
@@ -104,9 +104,18 @@ class PassengerAgent(BaseTransportAgent):
         dest_station = self.city.get_nearest_station(self.destination)
         connecting_routes = self.city.get_route_by_stations(origin_station, dest_station)
         
+        # IMPROVEMENT: Evaluate ALL possible routes, not just first
         if connecting_routes:
-            self.preferred_route = connecting_routes[0]
-            print(f"👤 Passenger {self.passenger_id} found route: {self.preferred_route.id}")
+            route_scores = []
+            for route in connecting_routes:
+                score = self.evaluate_route_quality(route)
+                route_scores.append((route, score))
+                print(f"👤 Passenger {self.passenger_id} evaluating route {route.id}: score={score:.2f}")
+            
+            # Choose best route
+            route_scores.sort(key=lambda x: x[1], reverse=True)
+            self.preferred_route = route_scores[0][0]
+            print(f"✅ Passenger {self.passenger_id} selected route: {self.preferred_route.id}")
         
         # Request information from nearby vehicles
         nearby_vehicles = await self.get_nearby_vehicles()
@@ -119,11 +128,48 @@ class PassengerAgent(BaseTransportAgent):
                     'origin': {'x': self.origin.x, 'y': self.origin.y},
                     'destination': {'x': self.destination.x, 'y': self.destination.y},
                     'request_type': 'availability_check',
-                    'max_waiting_time': self.patience_time
+                    'max_waiting_time': self.patience_time,
+                    'urgency': self.calculate_urgency()
                 },
                 MESSAGE_TYPES['PASSENGER_REQUEST']
             )
             self.requests_sent += 1
+    
+    def evaluate_route_quality(self, route) -> float:
+        """Evaluate quality of a route based on multiple factors"""
+        score = 0.0
+        
+        # Factor 1: Number of stops (fewer is better)
+        num_stops = len(route.stations)
+        if num_stops <= 5:
+            score += 0.4
+        elif num_stops <= 8:
+            score += 0.3
+        else:
+            score += 0.1
+        
+        # Factor 2: Route popularity (from metrics if available)
+        route_efficiency = getattr(route, 'efficiency_rating', 0.5)
+        score += route_efficiency * 0.3
+        
+        # Factor 3: Distance directness
+        origin_station = self.city.get_nearest_station(self.origin)
+        dest_station = self.city.get_nearest_station(self.destination)
+        
+        if origin_station in route.stations and dest_station in route.stations:
+            # Check if route goes directly
+            origin_idx = route.stations.index(origin_station)
+            dest_idx = route.stations.index(dest_station)
+            if dest_idx > origin_idx:  # Right direction
+                score += 0.3
+        
+        return score
+    
+    def calculate_urgency(self) -> float:
+        """Calculate how urgent this passenger's request is"""
+        waiting_time = (datetime.now() - self.arrival_time).total_seconds() / 60
+        urgency = min(1.0, waiting_time / self.patience_time)
+        return urgency
     
     async def handle_vehicle_response(self, msg):
         """Handle response from a vehicle"""
@@ -152,27 +198,48 @@ class PassengerAgent(BaseTransportAgent):
                 asyncio.create_task(self.make_travel_decision())
     
     async def make_travel_decision(self):
-        """Decide which vehicle to board based on collected proposals"""
+        """Decide which vehicle to board based on collected proposals - ACTIVE COMPARISON"""
         # Wait for deadline or until we have enough options
         await asyncio.sleep(10)
         
         if not self.vehicle_proposals:
-            print(f"😞 Passenger {self.passenger_id} received no offers")
+            print(f"😞 Passenger {self.passenger_id} received no offers - trying alternative routes")
+            # IMPROVEMENT: Try alternative routes or longer wait
+            await self.try_alternative_routes()
             return
         
-        # Evaluate all proposals and choose the best one
-        best_vehicle = None
-        best_score = -1
+        # IMPROVEMENT: Compare ALL proposals with detailed logging
+        print(f"🤔 Passenger {self.passenger_id} comparing {len(self.vehicle_proposals)} options:")
         
+        ranked_options = []
         for vehicle_id, proposal in self.vehicle_proposals.items():
             score = self.evaluate_vehicle_option(proposal)
+            ranked_options.append((vehicle_id, proposal, score))
             
-            if score > best_score:
-                best_score = score
-                best_vehicle = proposal
+            # Log comparison details
+            wait_time = (proposal['estimated_arrival'] - datetime.now()).total_seconds() / 60 if proposal.get('estimated_arrival') else 999
+            print(f"  - {vehicle_id}: score={score:.2f}, wait={wait_time:.1f}min, capacity={proposal.get('capacity', 0)}")
         
-        if best_vehicle:
+        # Sort by score
+        ranked_options.sort(key=lambda x: x[2], reverse=True)
+        
+        if ranked_options:
+            best_vehicle_id, best_vehicle, best_score = ranked_options[0]
+            print(f"✅ Passenger {self.passenger_id} chose {best_vehicle_id} (score: {best_score:.2f})")
             await self.request_boarding(best_vehicle)
+        
+    async def try_alternative_routes(self):
+        """Try finding alternative routes when first attempt fails"""
+        print(f"🔄 Passenger {self.passenger_id} searching for alternatives...")
+        
+        # Increase patience slightly
+        self.max_waiting_time += timedelta(minutes=5)
+        
+        # Reset and try again
+        self.vehicle_proposals = {}
+        self.decision_deadline = None
+        await asyncio.sleep(5)
+        await self.discover_routes()
     
     def evaluate_vehicle_option(self, proposal: Dict[str, Any]) -> float:
         """Evaluate a vehicle option and return a score"""

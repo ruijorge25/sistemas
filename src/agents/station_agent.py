@@ -52,6 +52,10 @@ class StationAgent(BaseTransportAgent):
         # Contract Net Protocol
         self.cnp_initiator = ContractNetInitiator(self, cfp_timeout=10)
         
+        # Dynamic events
+        self.event_manager = None  # Will be set by coordinator
+        self.demand_modifier = 1.0
+        
     async def setup(self):
         """Setup station-specific behaviours"""
         await super().setup()
@@ -64,7 +68,7 @@ class StationAgent(BaseTransportAgent):
         self.add_behaviour(self.ContractNetHandler())
         
     class PassengerArrivalSimulation(BaseTransportAgent.MessageReceiver):
-        """Simulate passenger arrivals at the station"""
+        """Simulate passenger arrivals - REACTS TO CONCERTS/EVENTS"""
         
         async def run(self):
             await asyncio.sleep(random.uniform(1, 3))  # Random arrival intervals
@@ -79,6 +83,15 @@ class StationAgent(BaseTransportAgent):
                 if start_hour <= current_hour <= end_hour:
                     arrival_rate *= SIMULATION_CONFIG['passenger']['rush_hour_multiplier']
                     break
+            
+            # IMPROVEMENT: Check for dynamic events (concerts, surges)
+            if self.agent.event_manager:
+                pos = (self.agent.position.x, self.agent.position.y)
+                self.agent.demand_modifier = self.agent.event_manager.get_demand_modifier(pos)
+                arrival_rate *= self.agent.demand_modifier
+                
+                if self.agent.demand_modifier > 2.0:
+                    print(f"📈 Station {self.agent.station_id} experiencing {self.agent.demand_modifier:.1f}x demand surge!")
             
             if random.random() < arrival_rate:
                 await self.agent.add_passenger_to_queue()

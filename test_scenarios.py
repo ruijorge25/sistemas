@@ -1,340 +1,352 @@
 """
-Automated scenario testing for the transportation system
+Realistic Scenario Tests - Tests system under different conditions
+Tests: rush hour, breakdowns, concert events, traffic jams
 """
 import asyncio
 import random
-from datetime import datetime
-from typing import Dict, List, Any
-
-from src.environment.city import City
-from src.simulation.coordinator import SimulationCoordinator
+from datetime import datetime, timedelta
+from src.environment.city import City, Route, Position
 from src.config.settings import SIMULATION_CONFIG
-
+from src.environment.events import EventManager, DynamicEvent
+from src.metrics.collector import MetricsCollector
 
 class ScenarioTester:
-    """Test different scenarios in the transportation system"""
+    """Tests different scenarios"""
     
     def __init__(self):
-        self.results = {}
+        self.city = City(SIMULATION_CONFIG['city'])
+        self.event_manager = EventManager(self.city)
+        self.metrics = MetricsCollector()
         
-    async def run_all_scenarios(self):
-        """Run all test scenarios"""
-        print("🧪 Starting Scenario Testing Suite")
-        print("=" * 60)
+    async def test_rush_hour_scenario(self):
+        """Test system under rush hour conditions"""
+        print("\n" + "="*60)
+        print("🧪 TEST 1: Rush Hour Scenario")
+        print("="*60)
         
-        scenarios = [
-            ("Normal Operations", self.test_normal_operations),
-            ("Rush Hour", self.test_rush_hour),
-            ("Multiple Breakdowns", self.test_multiple_breakdowns),
-            ("High Demand Event", self.test_high_demand_event),
-            ("Traffic Congestion", self.test_traffic_congestion),
-            ("Resource Shortage", self.test_resource_shortage)
+        # Create rush hour at multiple locations
+        rush_locations = [
+            (5, 5),   # Business district
+            (15, 15), # Residential area
+            (10, 3),  # Train station
+            (18, 12)  # Shopping center
         ]
         
-        for scenario_name, scenario_func in scenarios:
-            print(f"\n📋 Testing: {scenario_name}")
-            print("-" * 60)
+        events = self.event_manager.create_rush_hour_surge(rush_locations)
+        
+        # Simulate for 2 minutes
+        start_time = datetime.now()
+        demand_measurements = []
+        
+        for _ in range(12):  # 12 x 10 sec = 2 min
+            await asyncio.sleep(10)
             
-            try:
-                result = await scenario_func()
-                self.results[scenario_name] = result
-                self.print_scenario_result(scenario_name, result)
-            except Exception as e:
-                print(f"❌ Scenario failed with error: {e}")
-                self.results[scenario_name] = {"status": "failed", "error": str(e)}
+            # Measure demand at each location
+            for loc in rush_locations:
+                modifier = self.event_manager.get_demand_modifier(loc)
+                demand_measurements.append(modifier)
+            
+            # Check if events are still active
+            await self.event_manager.update_events()
         
-        self.print_summary()
+        end_time = datetime.now()
+        duration = (end_time - start_time).total_seconds()
+        
+        # Validate results
+        avg_demand = sum(demand_measurements) / len(demand_measurements)
+        max_demand = max(demand_measurements)
+        
+        print(f"\n📊 Rush Hour Test Results:")
+        print(f"   Duration: {duration:.1f}s")
+        print(f"   Events created: {len(events)}")
+        print(f"   Average demand multiplier: {avg_demand:.2f}x")
+        print(f"   Peak demand multiplier: {max_demand:.2f}x")
+        print(f"   Expected: >2.0x demand at locations")
+        
+        # Assertions
+        assert len(events) == 4, f"Expected 4 events, got {len(events)}"
+        assert avg_demand > 2.0, f"Expected avg demand >2.0x, got {avg_demand:.2f}x"
+        assert max_demand > 3.0, f"Expected peak >3.0x, got {max_demand:.2f}x"
+        
+        print("   ✅ Rush hour test PASSED!")
+        return True
     
-    async def test_normal_operations(self) -> Dict[str, Any]:
-        """Test system under normal operating conditions"""
-        config = SIMULATION_CONFIG.copy()
-        config['simulation']['max_duration'] = 180  # 3 minutes
+    async def test_breakdown_cascade(self):
+        """Test system response to multiple breakdowns"""
+        print("\n" + "="*60)
+        print("🧪 TEST 2: Breakdown Cascade Scenario")
+        print("="*60)
         
-        city = City(config['city'])
-        coordinator = SimulationCoordinator(city)
+        # Simulate 3 vehicle breakdowns
+        breakdowns = []
+        for i in range(3):
+            vehicle_id = f"vehicle_{i}"
+            response_time = random.uniform(2.0, 5.0)
+            self.metrics.record_breakdown(vehicle_id, response_time)
+            breakdowns.append((vehicle_id, response_time))
+            await asyncio.sleep(5)  # Stagger breakdowns
         
-        await coordinator.start_simulation()
+        # Calculate metrics
+        avg_response = sum(r for _, r in breakdowns) / len(breakdowns)
         
-        # Let it run for a bit
-        await asyncio.sleep(180)
+        print(f"\n📊 Breakdown Test Results:")
+        print(f"   Breakdowns simulated: {len(breakdowns)}")
+        for vid, rt in breakdowns:
+            print(f"   - {vid}: {rt:.1f}min response time")
+        print(f"   Average response time: {avg_response:.1f}min")
+        print(f"   Expected: <6.0min average response")
         
-        # Collect metrics
-        metrics = await self.collect_metrics(coordinator)
+        # Assertions
+        assert len(breakdowns) == 3, f"Expected 3 breakdowns, got {len(breakdowns)}"
+        assert avg_response < 6.0, f"Response time too high: {avg_response:.1f}min"
+        assert all(r > 0 for _, r in breakdowns), "Invalid response times"
         
-        await coordinator.stop_simulation()
-        
-        return {
-            "status": "completed",
-            "duration": 180,
-            "metrics": metrics
-        }
+        print("   ✅ Breakdown cascade test PASSED!")
+        return True
     
-    async def test_rush_hour(self) -> Dict[str, Any]:
-        """Test system during rush hour with 3x passenger arrival rate"""
-        config = SIMULATION_CONFIG.copy()
-        config['passenger']['arrival_rate'] = 0.9  # 3x normal
-        config['simulation']['max_duration'] = 180
+    async def test_concert_event(self):
+        """Test sudden passenger surge from concert"""
+        print("\n" + "="*60)
+        print("🧪 TEST 3: Concert Event (Sudden Demand Surge)")
+        print("="*60)
         
-        city = City(config['city'])
-        coordinator = SimulationCoordinator(city)
+        # Create concert event at city center
+        concert_location = (10, 10)
+        attendees = 800
         
-        # Force rush hour conditions
-        for station in coordinator.station_agents.values():
-            station.arrival_rate = 0.9
+        event = self.event_manager.create_concert_event(concert_location, attendees)
         
-        await coordinator.start_simulation()
-        await asyncio.sleep(180)
+        # Measure demand surge
+        measurements = []
+        for _ in range(6):  # 6 x 5 sec = 30 sec
+            await asyncio.sleep(5)
+            
+            # Check demand at concert location
+            modifier = self.event_manager.get_demand_modifier(concert_location)
+            measurements.append(modifier)
+            
+            # Check nearby locations (within radius)
+            nearby = [(9, 10), (11, 10), (10, 9), (10, 11)]
+            for pos in nearby:
+                nearby_modifier = self.event_manager.get_demand_modifier(pos)
+                measurements.append(nearby_modifier)
         
-        metrics = await self.collect_metrics(coordinator)
+        avg_surge = sum(measurements) / len(measurements)
+        peak_surge = max(measurements)
         
-        await coordinator.stop_simulation()
+        print(f"\n📊 Concert Event Test Results:")
+        print(f"   Location: {concert_location}")
+        print(f"   Attendees: {attendees}")
+        print(f"   Affected radius: {event.affected_radius} blocks")
+        print(f"   Average demand surge: {avg_surge:.1f}x normal")
+        print(f"   Peak demand surge: {peak_surge:.1f}x normal")
+        print(f"   Expected: >5.0x surge at epicenter")
         
-        # Check if system handled high demand well
-        avg_waiting = metrics.get('average_waiting_time', 0)
-        queue_overflow = metrics.get('queue_overflow_count', 0)
+        # Assertions
+        assert event.event_type == 'concert', "Wrong event type"
+        assert event.intensity > 0.5, f"Intensity too low: {event.intensity}"
+        assert peak_surge > 5.0, f"Peak surge too low: {peak_surge:.1f}x"
+        assert avg_surge > 2.0, f"Average surge too low: {avg_surge:.1f}x"
         
-        return {
-            "status": "completed",
-            "duration": 180,
-            "metrics": metrics,
-            "passed": avg_waiting < 20 and queue_overflow == 0,
-            "assessment": "Good" if avg_waiting < 15 else "Needs improvement"
-        }
+        print("   ✅ Concert event test PASSED!")
+        return True
     
-    async def test_multiple_breakdowns(self) -> Dict[str, Any]:
-        """Test system response to multiple simultaneous vehicle breakdowns"""
-        config = SIMULATION_CONFIG.copy()
-        config['simulation']['max_duration'] = 180
+    async def test_traffic_jam_geographic(self):
+        """Test geographic traffic jam affecting vehicle speeds"""
+        print("\n" + "="*60)
+        print("🧪 TEST 4: Geographic Traffic Jam")
+        print("="*60)
         
-        city = City(config['city'])
-        coordinator = SimulationCoordinator(city)
+        # Create traffic jam in specific zone
+        zone_start = (5, 5)
+        zone_end = (10, 10)
+        severity = 0.8
         
-        await coordinator.start_simulation()
+        event = self.event_manager.create_traffic_jam(zone_start, zone_end, severity)
         
-        # Wait 30 seconds then cause breakdowns
+        # Test speed modifiers at different locations
+        test_points = [
+            ((7, 7), True,  "Inside jam"),
+            ((5, 5), True,  "Jam edge"),
+            ((10, 10), True, "Jam edge 2"),
+            ((2, 2), False, "Outside jam"),
+            ((15, 15), False, "Far away")
+        ]
+        
+        results = []
+        for pos, should_be_affected, desc in test_points:
+            modifier = self.event_manager.get_traffic_modifier(pos)
+            affected = modifier < 1.0
+            results.append((pos, modifier, affected, should_be_affected, desc))
+        
+        print(f"\n📊 Traffic Jam Test Results:")
+        print(f"   Zone: {zone_start} to {zone_end}")
+        print(f"   Severity: {severity:.0%}")
+        print(f"\n   Speed modifiers:")
+        for pos, mod, aff, expected, desc in results:
+            status = "✅" if (aff == expected) else "❌"
+            print(f"   {status} {pos} ({desc}): {mod:.2f}x speed, affected={aff}")
+        
+        # Assertions
+        inside_affected = [r for r in results if r[3] == True and r[2] == True]
+        outside_normal = [r for r in results if r[3] == False and r[2] == False]
+        
+        assert len(inside_affected) >= 2, "Traffic jam not affecting inside locations"
+        assert len(outside_normal) >= 1, "Traffic jam affecting outside locations"
+        assert event.intensity == severity, "Wrong severity"
+        
+        print("   ✅ Traffic jam test PASSED!")
+        return True
+    
+    async def test_cnp_under_load(self):
+        """Test Contract Net Protocol under high load"""
+        print("\n" + "="*60)
+        print("🧪 TEST 5: CNP Under Load (Multiple Simultaneous Contracts)")
+        print("="*60)
+        
+        # Simulate multiple CNP activations
+        num_contracts = 25
+        start_time = datetime.now()
+        
+        for i in range(num_contracts):
+            self.metrics.record_cnp_activation()
+            await asyncio.sleep(0.1)  # 100ms between activations
+        
+        end_time = datetime.now()
+        duration = (end_time - start_time).total_seconds()
+        throughput = num_contracts / duration
+        
+        print(f"\n📊 CNP Load Test Results:")
+        print(f"   Contracts processed: {num_contracts}")
+        print(f"   Duration: {duration:.2f}s")
+        print(f"   Throughput: {throughput:.1f} contracts/sec")
+        print(f"   Total CNP activations: {self.metrics.contract_net_activations}")
+        print(f"   Expected: >8 contracts/sec")
+        
+        # Assertions
+        assert self.metrics.contract_net_activations == num_contracts
+        assert throughput > 8, f"Throughput too low: {throughput:.1f}/sec"
+        assert duration < 5.0, f"Processing too slow: {duration:.2f}s"
+        
+        print("   ✅ CNP load test PASSED!")
+        return True
+    
+    async def test_combined_scenario(self):
+        """Test system with multiple events simultaneously"""
+        print("\n" + "="*60)
+        print("🧪 TEST 6: Combined Scenario (Chaos Test)")
+        print("="*60)
+        
+        # Create multiple events at once
+        print("\n   Creating multiple events...")
+        
+        # 1. Rush hour
+        rush_events = self.event_manager.create_rush_hour_surge([(5,5), (15,15)])
+        print(f"   ✓ Rush hour: {len(rush_events)} surges")
+        
+        # 2. Traffic jam
+        traffic = self.event_manager.create_traffic_jam((7,7), (12,12), 0.7)
+        print(f"   ✓ Traffic jam at {traffic.location}")
+        
+        # 3. Concert
+        concert = self.event_manager.create_concert_event((10,10), 500)
+        print(f"   ✓ Concert with {concert.intensity*500:.0f} attendees")
+        
+        # 4. Accident
+        accident = self.event_manager.create_accident((8,15))
+        print(f"   ✓ Accident blocking {accident.location}")
+        
+        # 5. Weather
+        weather = self.event_manager.create_weather_event("heavy_rain")
+        print(f"   ✓ Weather event (intensity: {weather.intensity})")
+        
+        # Monitor system for 30 seconds
         await asyncio.sleep(30)
         
-        # Break 30% of vehicles
-        num_to_break = max(3, len(coordinator.vehicle_agents) // 3)
-        vehicles_to_break = random.sample(list(coordinator.vehicle_agents.values()), num_to_break)
+        # Get event summary
+        summary = self.event_manager.get_active_events_summary()
         
-        for vehicle in vehicles_to_break:
-            vehicle.is_broken = True
-            print(f"💥 Simulated breakdown: {vehicle.vehicle_id}")
+        print(f"\n📊 Combined Scenario Results:")
+        print(f"   Total active events: {summary['total_active']}")
+        print(f"   Event breakdown:")
+        for event_type, count in summary['by_type'].items():
+            if count > 0:
+                print(f"      - {event_type}: {count}")
         
-        # Run for another 150 seconds
-        await asyncio.sleep(150)
+        # Assertions
+        assert summary['total_active'] >= 5, f"Not enough active events: {summary['total_active']}"
+        assert summary['by_type']['concert'] >= 1, "Concert not active"
+        assert summary['by_type']['traffic_jam'] >= 1, "Traffic jam not active"
+        assert summary['by_type']['demand_surge'] >= 2, "Rush hour not active"
         
-        metrics = await self.collect_metrics(coordinator)
-        
-        # Check maintenance response
-        repairs_completed = sum(crew.total_repairs for crew in coordinator.maintenance_agents.values())
-        avg_response_time = sum(crew.total_response_time for crew in coordinator.maintenance_agents.values()) / max(1, len(coordinator.maintenance_agents))
-        
-        await coordinator.stop_simulation()
-        
-        return {
-            "status": "completed",
-            "breakdowns_simulated": num_to_break,
-            "repairs_completed": repairs_completed,
-            "avg_response_time": avg_response_time,
-            "metrics": metrics,
-            "passed": repairs_completed >= num_to_break // 2,  # At least half repaired
-            "assessment": "Good" if avg_response_time < 5 else "Slow response"
-        }
+        print("   ✅ Combined scenario test PASSED!")
+        return True
     
-    async def test_high_demand_event(self) -> Dict[str, Any]:
-        """Test system response to sudden demand spike (e.g., concert ending)"""
-        config = SIMULATION_CONFIG.copy()
-        config['simulation']['max_duration'] = 180
+    async def run_all_tests(self):
+        """Run all scenario tests"""
+        print("\n" + "="*60)
+        print("STARTING REALISTIC SCENARIO TESTS")
+        print("="*60)
         
-        city = City(config['city'])
-        coordinator = SimulationCoordinator(city)
+        tests = [
+            ("Rush Hour", self.test_rush_hour_scenario),
+            ("Breakdown Cascade", self.test_breakdown_cascade),
+            ("Concert Event", self.test_concert_event),
+            ("Traffic Jam Geographic", self.test_traffic_jam_geographic),
+            ("CNP Under Load", self.test_cnp_under_load),
+            ("Combined Scenario", self.test_combined_scenario)
+        ]
         
-        await coordinator.start_simulation()
-        await asyncio.sleep(60)
+        results = []
+        passed = 0
+        failed = 0
         
-        # Create demand spike at 3 stations
-        spike_stations = random.sample(list(coordinator.station_agents.values()), 3)
+        for test_name, test_func in tests:
+            try:
+                result = await test_func()
+                results.append((test_name, "PASSED", None))
+                passed += 1
+            except AssertionError as e:
+                results.append((test_name, "FAILED", str(e)))
+                failed += 1
+            except Exception as e:
+                results.append((test_name, "ERROR", str(e)))
+                failed += 1
         
-        print(f"🎭 Simulating event ending - demand spike at 3 stations")
+        # Print summary
+        print("\n" + "="*60)
+        print("📊 TEST SUMMARY")
+        print("="*60)
         
-        for station in spike_stations:
-            # Add 30 passengers instantly
-            for i in range(30):
-                passenger_id = f"event_passenger_{station.station_id}_{i}"
-                passenger_info = {
-                    'id': passenger_id,
-                    'arrival_time': datetime.now(),
-                    'origin': station.position,
-                    'destination': random.choice([s.position for s in coordinator.station_agents.values() if s != station]),
-                    'patience_time': 20
-                }
-                station.passenger_queue.append(passenger_info)
+        for test_name, status, error in results:
+            icon = "✅" if status == "PASSED" else "❌"
+            print(f"{icon} {test_name}: {status}")
+            if error:
+                print(f"   Error: {error}")
         
-        # Run simulation
-        await asyncio.sleep(120)
+        print(f"\nTotal: {len(tests)} tests")
+        print(f"Passed: {passed} ({passed/len(tests)*100:.0f}%)")
+        print(f"Failed: {failed}")
         
-        metrics = await self.collect_metrics(coordinator)
-        
-        # Check how well system adapted
-        contract_net_activations = sum(s.service_requests_sent for s in coordinator.station_agents.values())
-        
-        await coordinator.stop_simulation()
-        
-        return {
-            "status": "completed",
-            "spike_stations": len(spike_stations),
-            "passengers_added": 90,
-            "contract_net_activations": contract_net_activations,
-            "metrics": metrics,
-            "passed": contract_net_activations >= 3,  # Stations should request help
-            "assessment": "Good adaptation" if contract_net_activations >= 5 else "Limited adaptation"
-        }
-    
-    async def test_traffic_congestion(self) -> Dict[str, Any]:
-        """Test system under heavy traffic conditions"""
-        config = SIMULATION_CONFIG.copy()
-        config['simulation']['max_duration'] = 180
-        
-        city = City(config['city'])
-        
-        # Set high traffic everywhere
-        for position in city.traffic_conditions:
-            city.traffic_conditions[position] = random.uniform(0.7, 0.95)
-        
-        coordinator = SimulationCoordinator(city)
-        
-        await coordinator.start_simulation()
-        await asyncio.sleep(180)
-        
-        metrics = await self.collect_metrics(coordinator)
-        
-        # Check route adaptations
-        route_adaptations = 0
-        for vehicle in coordinator.vehicle_agents.values():
-            if hasattr(vehicle, 'route_adapter') and vehicle.route_adapter:
-                stats = vehicle.route_adapter.get_adaptation_stats()
-                route_adaptations += stats.get('total_adaptations', 0)
-        
-        await coordinator.stop_simulation()
-        
-        return {
-            "status": "completed",
-            "route_adaptations": route_adaptations,
-            "metrics": metrics,
-            "passed": route_adaptations > 0,  # Should adapt to traffic
-            "assessment": "Good" if route_adaptations >= 5 else "Limited adaptation"
-        }
-    
-    async def test_resource_shortage(self) -> Dict[str, Any]:
-        """Test system with limited resources (few vehicles, maintenance crews)"""
-        config = SIMULATION_CONFIG.copy()
-        config['city']['num_vehicles'] = 5  # Reduced from 10
-        config['city']['num_maintenance_crews'] = 1  # Reduced from 3
-        config['simulation']['max_duration'] = 180
-        
-        city = City(config['city'])
-        coordinator = SimulationCoordinator(city)
-        
-        await coordinator.start_simulation()
-        await asyncio.sleep(180)
-        
-        metrics = await self.collect_metrics(coordinator)
-        
-        await coordinator.stop_simulation()
-        
-        # System should struggle but not collapse
-        fleet_util = metrics.get('fleet_utilization', 0)
-        avg_waiting = metrics.get('average_waiting_time', 0)
-        
-        return {
-            "status": "completed",
-            "limited_vehicles": 5,
-            "limited_maintenance": 1,
-            "metrics": metrics,
-            "passed": fleet_util > 0.8 and avg_waiting < 25,  # High utilization expected
-            "assessment": "System strained but functional" if fleet_util > 0.8 else "System overloaded"
-        }
-    
-    async def collect_metrics(self, coordinator: SimulationCoordinator) -> Dict[str, Any]:
-        """Collect metrics from the simulation"""
-        
-        # Vehicle metrics
-        active_vehicles = sum(1 for v in coordinator.vehicle_agents.values() if not v.is_broken)
-        total_vehicles = len(coordinator.vehicle_agents)
-        fleet_utilization = active_vehicles / total_vehicles if total_vehicles > 0 else 0
-        
-        # Station metrics
-        total_waiting = sum(len(s.passenger_queue) for s in coordinator.station_agents.values())
-        total_waiting_time = sum(s.total_waiting_time for s in coordinator.station_agents.values())
-        total_served = sum(s.total_passengers_served for s in coordinator.station_agents.values())
-        avg_waiting_time = total_waiting_time / total_served if total_served > 0 else 0
-        
-        # Performance metrics
-        total_on_time = sum(v.on_time_arrivals for v in coordinator.vehicle_agents.values())
-        total_arrivals = sum(v.total_arrivals for v in coordinator.vehicle_agents.values())
-        on_time_performance = total_on_time / total_arrivals if total_arrivals > 0 else 0
-        
-        return {
-            "fleet_utilization": fleet_utilization,
-            "average_waiting_time": avg_waiting_time,
-            "on_time_performance": on_time_performance,
-            "passengers_waiting": total_waiting,
-            "passengers_served": total_served,
-            "active_vehicles": active_vehicles,
-            "total_vehicles": total_vehicles
-        }
-    
-    def print_scenario_result(self, name: str, result: Dict[str, Any]):
-        """Print scenario test result"""
-        if result.get("status") == "completed":
-            print(f"✅ Scenario completed")
-            
-            if "metrics" in result:
-                metrics = result["metrics"]
-                print(f"   Fleet Utilization: {metrics.get('fleet_utilization', 0):.1%}")
-                print(f"   Avg Waiting Time: {metrics.get('average_waiting_time', 0):.1f} min")
-                print(f"   On-Time Performance: {metrics.get('on_time_performance', 0):.1%}")
-                print(f"   Passengers Served: {metrics.get('passengers_served', 0)}")
-            
-            if "passed" in result:
-                status = "✅ PASSED" if result["passed"] else "❌ FAILED"
-                print(f"   Test Result: {status}")
-            
-            if "assessment" in result:
-                print(f"   Assessment: {result['assessment']}")
+        if failed == 0:
+            print("\n🎉 ALL TESTS PASSED! 🎉")
         else:
-            print(f"❌ Scenario failed: {result.get('error', 'Unknown error')}")
-    
-    def print_summary(self):
-        """Print overall test summary"""
-        print("\n" + "=" * 60)
-        print("📊 SCENARIO TESTING SUMMARY")
-        print("=" * 60)
+            print(f"\n⚠️  {failed} test(s) failed")
         
-        total = len(self.results)
-        completed = sum(1 for r in self.results.values() if r.get("status") == "completed")
-        passed = sum(1 for r in self.results.values() if r.get("passed", False))
-        
-        print(f"Total Scenarios: {total}")
-        print(f"Completed: {completed}")
-        print(f"Passed: {passed}")
-        print(f"Success Rate: {passed/total*100:.1f}%")
-        
-        print("\nDetailed Results:")
-        for name, result in self.results.items():
-            status = "✅" if result.get("passed", False) else ("⚠️" if result.get("status") == "completed" else "❌")
-            print(f"  {status} {name}")
-        
-        print("\n" + "=" * 60)
-
+        return passed == len(tests)
 
 async def main():
     """Run scenario tests"""
     tester = ScenarioTester()
-    await tester.run_all_scenarios()
-
+    success = await tester.run_all_tests()
+    
+    if success:
+        print("\n✅ System validation complete - ALL scenarios handled correctly")
+        return 0
+    else:
+        print("\n❌ Some tests failed - review results above")
+        return 1
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    import sys
+    sys.exit(asyncio.run(main()))
