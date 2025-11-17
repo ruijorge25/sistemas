@@ -12,6 +12,12 @@ class Position:
     
     def distance_to(self, other: 'Position') -> float:
         return ((self.x - other.x)**2 + (self.y - other.y)**2)**0.5
+    
+    def __eq__(self, other):
+        return isinstance(other, Position) and self.x == other.x and self.y == other.y
+    
+    def __hash__(self):
+        return hash((self.x, self.y))
 
 @dataclass
 class Route:
@@ -24,12 +30,15 @@ class City:
         self.name = config['name']
         self.grid_size = config['grid_size']
         self.stations = []
+        self.station_types = {}  # Position -> 'bus', 'tram', or 'mixed'
         self.routes = []
         self.traffic_conditions = {}  # position -> congestion level (0-1)
+        self.weather_active = False  # Rain/weather effects
         
         self._generate_stations(config['num_stations'])
         self._generate_routes()
         self._initialize_traffic()
+        self._assign_station_types()
     
     def _generate_stations(self, num_stations: int):
         """Generate station positions across the city grid"""
@@ -70,6 +79,29 @@ class City:
                 # Base traffic level with some randomness
                 self.traffic_conditions[Position(x, y)] = random.uniform(0.1, 0.3)
     
+    def _assign_station_types(self):
+        """Assign station types based on routes that serve them"""
+        for station in self.stations:
+            bus_routes = []
+            tram_routes = []
+            
+            for route in self.routes:
+                if station in route.stations:
+                    if route.vehicle_type == 'bus':
+                        bus_routes.append(route)
+                    elif route.vehicle_type == 'tram':
+                        tram_routes.append(route)
+            
+            # Determine station type
+            if bus_routes and tram_routes:
+                self.station_types[station] = 'mixed'
+            elif bus_routes:
+                self.station_types[station] = 'bus'
+            elif tram_routes:
+                self.station_types[station] = 'tram'
+            else:
+                self.station_types[station] = 'mixed'  # Default
+    
     def update_traffic(self, time_of_day: int):
         """Update traffic conditions based on time of day"""
         # Rush hour traffic simulation
@@ -96,3 +128,17 @@ class City:
             if start in route.stations and end in route.stations:
                 connecting_routes.append(route)
         return connecting_routes
+    
+    def activate_weather(self, weather_type: str = 'rain'):
+        """Activate weather effects (rain reduces speed, increases breakdowns)"""
+        self.weather_active = True
+        print(f"🌧️ Weather activated: {weather_type}")
+    
+    def deactivate_weather(self):
+        """Deactivate weather effects"""
+        self.weather_active = False
+        print(f"☀️ Weather cleared")
+    
+    def get_station_type(self, position: Position) -> str:
+        """Get the type of station at a position"""
+        return self.station_types.get(position, 'mixed')
