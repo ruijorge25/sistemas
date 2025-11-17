@@ -13,6 +13,7 @@ from ..environment.route_optimizer import RouteOptimizer, DynamicRouteAdapter
 from ..config.settings import MESSAGE_TYPES, SIMULATION_CONFIG
 from ..ml.learning import QLearningRouter, ReinforcementLearner
 from ..protocols.contract_net import ContractNetParticipant
+from .cooperation import VehicleCoordinator
 
 @dataclass
 class PassengerInfo:
@@ -24,6 +25,9 @@ class PassengerInfo:
 
 class VehicleAgent(BaseTransportAgent):
     """Agent representing a bus or tram vehicle"""
+    
+    # Shared vehicle coordinator for all vehicles (class variable)
+    coordinator = VehicleCoordinator()
     
     def __init__(self, jid: str, password: str, vehicle_id: str, vehicle_type: str, 
                  assigned_route: Route, city):
@@ -76,6 +80,10 @@ class VehicleAgent(BaseTransportAgent):
         self.event_manager = None  # Will be set by coordinator
         self.traffic_modifier = 1.0
         self.route_adaptations = 0
+        
+        # Vehicle cooperation
+        self.convoy_members = set()  # IDs of vehicles in convoy
+        self.is_in_convoy = False
         
     async def setup(self):
         """Setup vehicle-specific behaviours"""
@@ -286,6 +294,10 @@ class VehicleAgent(BaseTransportAgent):
         """Handle station requests for additional capacity"""
         import json
         request_data = json.loads(msg.body)
+        
+        # Use coordination protocol to announce intention
+        station_id = request_data.get('station_id', str(msg.sender))
+        await self.coordinator.announce_intention(self, station_id)
         
         # Simple capacity sharing logic
         available_capacity = self.capacity - len(self.passengers)

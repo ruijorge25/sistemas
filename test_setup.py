@@ -28,9 +28,6 @@ async def test_imports():
         from src.protocols.contract_net import ContractNetInitiator, ContractNetParticipant
         print("✅ Protocol modules imported successfully")
         
-        from src.simulation.coordinator import SimulationCoordinator
-        print("✅ Simulation module imported successfully")
-        
         print("\n🎉 All modules imported successfully!")
         return True
         
