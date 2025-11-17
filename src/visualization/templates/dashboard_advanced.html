@@ -228,6 +228,13 @@
             animation: shake 0.5s infinite;
         }
         
+        .cell-maintenance {
+            background: linear-gradient(135deg, #FFA726 0%, #FB8C00 100%);
+            color: white;
+            animation: pulse 1.5s infinite;
+            font-weight: bold;
+        }
+        
         /* Info Panels */
         .info-section {
             display: grid;
@@ -458,19 +465,23 @@
                 <div class="legend">
                     <div class="legend-item">
                         <div class="legend-box" style="background: linear-gradient(135deg, #4CAF50 0%, #45a049 100%);"></div>
-                        <span>Bus</span>
+                        <span>Bus (Autocarro)</span>
                     </div>
                     <div class="legend-item">
                         <div class="legend-box" style="background: linear-gradient(135deg, #2196F3 0%, #1976D2 100%);"></div>
-                        <span>Tram</span>
+                        <span>Tram (Elétrico)</span>
+                    </div>
+                    <div class="legend-item">
+                        <div class="legend-box" style="background: linear-gradient(135deg, #FFA726 0%, #FB8C00 100%);"></div>
+                        <span>Maintenance (Equipa)</span>
                     </div>
                     <div class="legend-item">
                         <div class="legend-box" style="background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);"></div>
-                        <span>Station</span>
+                        <span>Station (Paragem)</span>
                     </div>
                     <div class="legend-item">
                         <div class="legend-box" style="background: linear-gradient(135deg, #ff6b6b 0%, #c92a2a 100%);"></div>
-                        <span>Broken</span>
+                        <span>Broken (Avariado)</span>
                     </div>
                 </div>
             </div>
@@ -625,12 +636,12 @@
         
         function updateMetrics(metrics) {
             const metricsData = [
-                { id: 'metric-0', icon: '📊', label: 'Fleet Utilization', value: (metrics.fleet_utilization * 100).toFixed(0) + '%', trend: '+2%', trendClass: 'trend-up' },
-                { id: 'metric-1', icon: '⏱️', label: 'Avg Wait Time', value: metrics.average_waiting_time.toFixed(1) + 'm', trend: '-0.5m', trendClass: 'trend-down' },
-                { id: 'metric-2', icon: '✅', label: 'On-Time', value: (metrics.on_time_performance * 100).toFixed(0) + '%', trend: '+5%', trendClass: 'trend-up' },
-                { id: 'metric-3', icon: '😊', label: 'Satisfaction', value: (metrics.passenger_satisfaction * 100).toFixed(0) + '%', trend: '+3%', trendClass: 'trend-up' },
-                { id: 'metric-4', icon: '🔧', label: 'Response Time', value: metrics.breakdown_response_time.toFixed(1) + 'm', trend: '-0.2m', trendClass: 'trend-down' },
-                { id: 'metric-5', icon: '🔄', label: 'Route Adapt', value: metrics.route_adaptations, trend: '+2', trendClass: 'trend-up' },
+                { id: 'metric-0', icon: '📊', label: 'Fleet Utilization', value: (metrics.vehicle_utilization || 0).toFixed(0) + '%', trend: '+2%', trendClass: 'trend-up' },
+                { id: 'metric-1', icon: '⏱️', label: 'Avg Wait Time', value: (metrics.average_wait_time || 0).toFixed(1) + 'm', trend: '-0.5m', trendClass: 'trend-down' },
+                { id: 'metric-2', icon: '✅', label: 'System Efficiency', value: (metrics.system_efficiency || 0).toFixed(0) + '%', trend: '+5%', trendClass: 'trend-up' },
+                { id: 'metric-3', icon: '😊', label: 'Fuel Efficiency', value: (metrics.fuel_efficiency || 0).toFixed(0) + '%', trend: '+3%', trendClass: 'trend-up' },
+                { id: 'metric-4', icon: '🔧', label: 'Active Vehicles', value: (metrics.active_vehicles || 0), trend: '', trendClass: 'trend-up' },
+                { id: 'metric-5', icon: '🔄', label: 'Active Convoys', value: (metrics.active_convoys || 0), trend: '+2', trendClass: 'trend-up' },
                 { id: 'metric-6', icon: '🤝', label: 'Cooperations', value: metrics.contract_net_activations, trend: '+4', trendClass: 'trend-up' }
             ];
             
@@ -680,9 +691,9 @@
             }
             
             performanceData.labels.push(now);
-            performanceData.utilization.push(metrics.fleet_utilization * 100);
-            performanceData.satisfaction.push(metrics.passenger_satisfaction * 100);
-            performanceData.onTime.push(metrics.on_time_performance * 100);
+            performanceData.utilization.push(metrics.vehicle_utilization || 0);
+            performanceData.satisfaction.push(metrics.system_efficiency || 0);
+            performanceData.onTime.push(metrics.fuel_efficiency || 0);
             
             performanceChart.data.labels = performanceData.labels;
             performanceChart.data.datasets[0].data = performanceData.utilization;
@@ -690,10 +701,10 @@
             performanceChart.data.datasets[2].data = performanceData.onTime;
             performanceChart.update('none');
             
-            // Update fleet chart (mock data)
-            const active = Math.floor(Math.random() * 5) + 5;
-            const idle = Math.floor(Math.random() * 3);
-            const broken = Math.floor(Math.random() * 2);
+            // Update fleet chart with real data
+            const active = metrics.active_vehicles || 0;
+            const idle = 0; // Not tracked in current API
+            const broken = metrics.broken_vehicles || 0;
             
             fleetChart.data.datasets[0].data = [active, idle, broken];
             fleetChart.update('none');
@@ -702,23 +713,48 @@
         function updateCityGrid(vehicles, stations) {
             const grid = Array(20).fill(null).map(() => Array(20).fill(null));
             
+            // Add stations first (lowest priority)
             stations.forEach(station => {
-                const x = station.position[0];
-                const y = station.position[1];
+                const x = Math.floor(station.position[0]);
+                const y = Math.floor(station.position[1]);
                 if (x >= 0 && x < 20 && y >= 0 && y < 20) {
-                    grid[y][x] = { type: 'station', label: 'S' };
+                    grid[y][x] = { 
+                        type: 'station', 
+                        label: 'S',
+                        tooltip: `${station.name}\n${station.waiting_passengers} passageiros à espera`
+                    };
                 }
             });
             
+            // Add vehicles (higher priority, will overwrite stations)
             vehicles.forEach(vehicle => {
-                const x = vehicle.position[0];
-                const y = vehicle.position[1];
+                const x = Math.floor(vehicle.position[0]);
+                const y = Math.floor(vehicle.position[1]);
                 if (x >= 0 && x < 20 && y >= 0 && y < 20) {
-                    const type = vehicle.status === 'broken' ? 'broken' : vehicle.type;
+                    let type, label, tooltip;
+                    
+                    if (vehicle.type === 'maintenance') {
+                        type = 'maintenance';
+                        label = 'M';
+                        tooltip = `${vehicle.id}\nEquipa de Manutenção\nA reparar: ${vehicle.target || 'N/A'}`;
+                    } else if (vehicle.status === 'broken') {
+                        type = 'broken';
+                        label = 'X';
+                        tooltip = `${vehicle.id}\nAVARIADO\nAguarda reparação`;
+                    } else if (vehicle.type === 'bus') {
+                        type = 'bus';
+                        label = 'B';
+                        tooltip = `${vehicle.id}\nAutocarro\n${vehicle.passengers}/${vehicle.capacity} passageiros\nCombustível: ${(vehicle.fuel * 100).toFixed(0)}%`;
+                    } else if (vehicle.type === 'tram') {
+                        type = 'tram';
+                        label = 'T';
+                        tooltip = `${vehicle.id}\nElétrico\n${vehicle.passengers}/${vehicle.capacity} passageiros\nCombustível: ${(vehicle.fuel * 100).toFixed(0)}%`;
+                    }
+                    
                     grid[y][x] = { 
                         type: type, 
-                        label: type === 'broken' ? 'X' : (vehicle.type === 'bus' ? 'B' : 'T'),
-                        hasCooperation: Math.random() < 0.3
+                        label: label,
+                        tooltip: tooltip
                     };
                 }
             });
@@ -728,11 +764,10 @@
                 for (let x = 0; x < 20; x++) {
                     const cell = grid[y][x];
                     if (!cell) {
-                        html += '<div class="cell cell-empty">·</div>';
+                        html += '<div class="cell cell-empty" title="Posição vazia">·</div>';
                     } else {
-                        html += `<div class="cell cell-${cell.type}" title="${cell.type} at (${x}, ${y})">
+                        html += `<div class="cell cell-${cell.type}" title="${cell.tooltip}">
                             ${cell.label}
-                            ${cell.hasCooperation ? '<div class="cooperation-indicator"></div>' : ''}
                         </div>`;
                     }
                 }
