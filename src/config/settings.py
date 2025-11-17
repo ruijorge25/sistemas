@@ -15,7 +15,7 @@ SIMULATION_CONFIG = {
         'fuel_capacity': 100,
         'fuel_consumption_per_cell': 1,  # 1 unit per cell moved
         'speed': 1,  # grid units per time unit
-        'breakdown_probability': 0.0015,  # 0.15% per time unit
+        'breakdown_probability': 0.0008,  # 0.08% per time unit
         'overcrowding_penalty_bus': 50,  # passengers > this = penalty
         'overcrowding_penalty_tram': 35  # passengers > this = penalty
     },

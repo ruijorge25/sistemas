@@ -1199,11 +1199,20 @@
                         tooltip = `${vehicle.id}\nElétrico\n${occupancy}/${capacity} passageiros\nCombustível: ${(vehicle.fuel * 100).toFixed(0)}%`;
                     }
                     
-                    grid[y][x] = { 
-                        type: type, 
-                        label: label,
-                        tooltip: tooltip
-                    };
+                    // Only overwrite if cell is empty or current vehicle has higher priority
+                    // Priority: broken > maintenance > normal vehicles
+                    const existingCell = grid[y][x];
+                    const shouldOverwrite = !existingCell || 
+                                           (type === 'broken') || 
+                                           (type === 'maintenance' && existingCell.type !== 'broken');
+                    
+                    if (shouldOverwrite) {
+                        grid[y][x] = { 
+                            type: type, 
+                            label: label,
+                            tooltip: tooltip
+                        };
+                    }
                 }
             });
             

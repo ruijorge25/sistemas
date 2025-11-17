@@ -28,6 +28,14 @@ class MaintenanceAgent(BaseTransportAgent):
         self.current_job = None
         self.available_tools = ['basic_repair', 'engine_repair', 'electrical_repair']
         
+        # TOW system and base management
+        self.towing_vehicle = False  # True when towing a vehicle to base
+        self.base_position = None  # Will be set by base_manager
+        self.base_manager = None  # Will be set externally
+        self.allocated_resources = {'tools': 0, 'tow_hooks': 0}  # Track allocated resources
+        self.state = 'at_base'  # 'at_base', 'moving_to_vehicle', 'repairing', 'towing', 'returning_to_base'
+        self.target_vehicle_agent = None  # Reference to vehicle being repaired
+        
         # Job queue and prioritization
         self.job_queue = []  # List of repair requests
         self.completed_jobs = []
@@ -149,36 +157,72 @@ class MaintenanceAgent(BaseTransportAgent):
         
         self.current_job = self.job_queue.pop(0)
         self.is_busy = True
+        self.state = 'moving_to_vehicle'
         
-        print(f"🚗 Maintenance crew {self.crew_id} starting repair of {self.current_job['vehicle_id']}")
-        
-        # Move to vehicle location (simplified - instant teleport for now)
-        self.current_position = self.current_job['position']
+        # Check breakdown type for TOW
+        breakdown_type = self.current_job.get('breakdown_type', 'engine')
+        print(f"🚗 Maintenance crew {self.crew_id} deployed for {self.current_job['vehicle_id']} ({breakdown_type})")
         
         # Calculate actual response time
         response_time = (datetime.now() - self.current_job['breakdown_time']).total_seconds() / 60
         self.total_response_time += response_time
         
-        # Start repair timer
-        self.current_job['repair_start_time'] = datetime.now()
-        self.current_job['repair_end_time'] = (
-            datetime.now() + timedelta(minutes=self.current_job['estimated_repair_time'])
-        )
+        # Don't start repair timer yet - wait until we reach the vehicle
+        self.current_job['dispatch_time'] = datetime.now()
     
     async def continue_repair(self):
-        """Continue current repair job"""
+        """Continue current repair job with state machine"""
         if not self.current_job:
+            # No job, return to base if not there
+            if self.state != 'at_base' and self.base_position:
+                await self.return_to_base()
             return
         
-        current_time = datetime.now()
+        breakdown_type = self.current_job.get('breakdown_type', 'engine')
+        target_pos = self.current_job['position']
         
-        # Check if repair is complete
-        if current_time >= self.current_job['repair_end_time']:
-            await self.complete_repair()
-        else:
-            # Repair still in progress
-            remaining_time = (self.current_job['repair_end_time'] - current_time).total_seconds() / 60
-            print(f"🔧 Repairing {self.current_job['vehicle_id']} - {remaining_time:.1f} minutes remaining")
+        # State machine for repair process
+        if self.state == 'moving_to_vehicle':
+            # Move towards broken vehicle
+            if self.current_position.x == target_pos.x and self.current_position.y == target_pos.y:
+                # Reached vehicle
+                if breakdown_type == 'tow':
+                    self.towing_vehicle = True
+                    self.state = 'towing'
+                    print(f"🚛 {self.crew_id} started towing {self.current_job['vehicle_id']}")
+                else:
+                    self.state = 'repairing'
+                    self.current_job['repair_start_time'] = datetime.now()
+                    self.current_job['repair_end_time'] = datetime.now() + timedelta(minutes=self.current_job['estimated_repair_time'])
+            else:
+                # Keep moving towards vehicle
+                await self.move_towards(target_pos)
+        
+        elif self.state == 'towing':
+            # Towing vehicle back to base
+            if self.base_position and (self.current_position.x != self.base_position.x or self.current_position.y != self.base_position.y):
+                # Move vehicle with us
+                if self.target_vehicle_agent:
+                    self.target_vehicle_agent.current_position = self.current_position
+                await self.move_towards(self.base_position)
+            else:
+                # Reached base, repair at base
+                self.state = 'repairing'
+                self.current_job['repair_start_time'] = datetime.now()
+                self.current_job['repair_end_time'] = datetime.now() + timedelta(seconds=5)  # Fast repair at base
+                print(f"🔧 {self.crew_id} repairing {self.current_job['vehicle_id']} at base")
+        
+        elif self.state == 'repairing':
+            current_time = datetime.now()
+            if current_time >= self.current_job['repair_end_time']:
+                await self.complete_repair()
+            else:
+                remaining = (self.current_job['repair_end_time'] - current_time).total_seconds()
+                if int(remaining) % 5 == 0:  # Log every 5 seconds
+                    print(f"🔧 Repairing {self.current_job['vehicle_id']} - {remaining:.0f}s remaining")
+        
+        elif self.state == 'returning_to_base':
+            await self.return_to_base()
     
     async def complete_repair(self):
         """Complete current repair job"""
@@ -186,40 +230,102 @@ class MaintenanceAgent(BaseTransportAgent):
             return
         
         vehicle_id = self.current_job['vehicle_id']
-        requester = self.current_job['requester']
+        requester = self.current_job.get('requester')
+        breakdown_type = self.current_job.get('breakdown_type', 'engine')
         
         # Calculate repair time
         repair_time = (datetime.now() - self.current_job['repair_start_time']).total_seconds() / 60
         self.total_repair_time += repair_time
         self.total_repairs += 1
         
+        # Release resources back to base_manager
+        if self.base_manager and self.allocated_resources['tools'] + self.allocated_resources['tow_hooks'] > 0:
+            self.base_manager.release_resources(
+                self.allocated_resources['tools'],
+                self.allocated_resources['tow_hooks']
+            )
+            print(f"✅ Resources released: {self.allocated_resources['tools']} tools, {self.allocated_resources['tow_hooks']} tow hooks")
+            self.allocated_resources = {'tools': 0, 'tow_hooks': 0}
+        
+        # Fix vehicle
+        if self.target_vehicle_agent:
+            self.target_vehicle_agent.is_broken = False
+            self.target_vehicle_agent.breakdown_type = None
+            self.target_vehicle_agent = None
+        
         # Move job to completed list
         self.current_job['completion_time'] = datetime.now()
         self.current_job['actual_repair_time'] = repair_time
         self.completed_jobs.append(self.current_job)
         
-        # Notify vehicle that repair is complete
-        await self.send_message(
-            requester,
-            {
-                'crew_id': self.crew_id,
-                'vehicle_id': vehicle_id,
-                'status': 'repaired',
-                'repair_time': repair_time,
-                'completion_time': datetime.now().isoformat()
-            },
-            MESSAGE_TYPES['MAINTENANCE_REQUEST']
-        )
+        # Notify vehicle that repair is complete (if using XMPP)
+        if requester:
+            await self.send_message(
+                requester,
+                {
+                    'crew_id': self.crew_id,
+                    'vehicle_id': vehicle_id,
+                    'status': 'repaired',
+                    'repair_time': repair_time,
+                    'completion_time': datetime.now().isoformat()
+                },
+                MESSAGE_TYPES['MAINTENANCE_REQUEST']
+            )
         
-        print(f"✅ Maintenance crew {self.crew_id} completed repair of {vehicle_id}")
+        tow_msg = " and towed" if breakdown_type == 'tow' else ""
+        print(f"✅ {self.crew_id} repaired{tow_msg} {vehicle_id}")
         
-        # Reset state
+        # Reset towing state
+        self.towing_vehicle = False
         self.current_job = None
-        self.is_busy = False
+        
+        # Return to base instead of just becoming idle
+        if self.base_position:
+            self.state = 'returning_to_base'
+            print(f"🏠 {self.crew_id} returning to base")
+        else:
+            self.is_busy = False
+            self.state = 'at_base'
         
         # Log metrics
         self.log_metric('repair_completion', 1)
         self.log_metric('repair_time', repair_time)
+    
+    async def move_towards(self, target: Position):
+        """Move one step towards target position"""
+        dx = target.x - self.current_position.x
+        dy = target.y - self.current_position.y
+        
+        # Move one step at a time (Manhattan distance)
+        if abs(dx) > abs(dy) and dx != 0:
+            self.current_position = Position(
+                self.current_position.x + (1 if dx > 0 else -1),
+                self.current_position.y
+            )
+        elif dy != 0:
+            self.current_position = Position(
+                self.current_position.x,
+                self.current_position.y + (1 if dy > 0 else -1)
+            )
+    
+    async def return_to_base(self):
+        """Return to base after completing repair"""
+        if not self.base_position:
+            self.state = 'at_base'
+            self.is_busy = False
+            return
+        
+        # Check if at base
+        if self.current_position.x == self.base_position.x and self.current_position.y == self.base_position.y:
+            self.state = 'at_base'
+            self.is_busy = False
+            if self.base_manager:
+                self.base_manager.park_at_base(self.crew_id, 'maintenance')
+            print(f"🏠 {self.crew_id} parked at base")
+            return
+        
+        # Move towards base
+        await self.move_towards(self.base_position)
     
     async def prioritize_jobs(self):
         """Re-prioritize jobs in the queue"""

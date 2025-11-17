@@ -259,6 +259,7 @@ class DemoSimulation:
             base_entry = self.base_manager.get_entry_point('maintenance')
             maint_agent = MockAgent(maint_id, base_entry, 'maintenance')
             maint_agent.state = 'at_base'
+            maint_agent.towing_vehicle = False  # Track if currently towing
             self.maintenance_agents.append(maint_agent)
             
             # Register and park maintenance agent
@@ -302,14 +303,9 @@ class DemoSimulation:
                 # Check if we have available maintenance vehicles at base
                 available_maint = self.base_manager.get_agents_at_base('maintenance')
                 
-                print(f"🔍 Checking maintenance for {vehicle.id} ({vehicle.breakdown_type})")
-                print(f"   Available maint IDs: {available_maint}")
-                print(f"   Resources needed: {tools_needed} tools, {tow_hooks_needed} hooks")
-                
                 if available_maint and self.base_manager.request_resources(tools_needed, tow_hooks_needed):
                     # Deploy a maintenance vehicle from base
                     maint_id = list(available_maint)[0]
-                    print(f"   Attempting to deploy {maint_id}")
                     spawn_pos = self.base_manager.deploy_from_base(maint_id, 'maintenance')
                     
                     if spawn_pos:
@@ -329,6 +325,7 @@ class DemoSimulation:
                         maint_agent.target_vehicle = vehicle.id
                         maint_agent.tools = tools_needed
                         maint_agent.tow_hooks = tow_hooks_needed
+                        maint_agent.towing_vehicle = False
                         
                         print(f"🚑 {maint_id} deployed from base to repair {vehicle.id} ({vehicle.breakdown_type})")
                         print(f"   Resources: {tools_needed} tools, {tow_hooks_needed} tow hooks")
@@ -342,49 +339,96 @@ class DemoSimulation:
         for maint in list(self.maintenance_agents):
             if maint.state == 'at_base':
                 continue
+            
+            # Check if maintenance is returning to base (no target)
+            if not maint.target_vehicle:
+                base_entry = self.base_manager.get_entry_point('maintenance')
                 
-            if maint.target_vehicle:
-                target = self.vehicles.get(maint.target_vehicle)
-                if target and target.is_broken:
-                    # Move towards broken vehicle
-                    if maint.position.x != target.position.x or maint.position.y != target.position.y:
-                        dx = 1 if target.position.x > maint.position.x else (-1 if target.position.x < maint.position.x else 0)
-                        dy = 1 if target.position.y > maint.position.y else (-1 if target.position.y < maint.position.y else 0)
-                        new_x = maint.position.x + dx
-                        new_y = maint.position.y + dy
-                        maint.position = Position(new_x, new_y)
+                # Move towards base
+                if maint.position.x != base_entry.x or maint.position.y != base_entry.y:
+                    dx = 1 if base_entry.x > maint.position.x else (-1 if base_entry.x < maint.position.x else 0)
+                    dy = 1 if base_entry.y > maint.position.y else (-1 if base_entry.y < maint.position.y else 0)
+                    maint.position = Position(maint.position.x + dx, maint.position.y + dy)
+                    maint.direction = (dx, dy)
+                else:
+                    # Reached base, park
+                    self.base_manager.park_at_base(maint.id, 'maintenance')
+                    maint.state = 'at_base'
+                    print(f"🏠 {maint.id} returned to base")
+                continue
+                
+            # Has target vehicle
+            target = self.vehicles.get(maint.target_vehicle)
+            if not target or not target.is_broken:
+                # Target no longer exists or is fixed, return to base
+                maint.target_vehicle = None
+                continue
+            
+            # Get breakdown type for this repair
+            breakdown_type = getattr(target, 'breakdown_type', 'tire')
+            
+            # TOW: If tow type, bring vehicle to base
+            if breakdown_type == 'tow' and hasattr(maint, 'towing_vehicle'):
+                if maint.towing_vehicle:
+                    # Moving to base with vehicle
+                    base_entry = self.base_manager.get_entry_point('maintenance')
+                    
+                    if maint.position.x != base_entry.x or maint.position.y != base_entry.y:
+                        # Move both maintenance and towed vehicle towards base
+                        dx = 1 if base_entry.x > maint.position.x else (-1 if base_entry.x < maint.position.x else 0)
+                        dy = 1 if base_entry.y > maint.position.y else (-1 if base_entry.y < maint.position.y else 0)
+                        maint.position = Position(maint.position.x + dx, maint.position.y + dy)
+                        target.position = Position(maint.position.x, maint.position.y)  # Towed vehicle follows
                         maint.direction = (dx, dy)
                     else:
-                        # Repair the vehicle
+                        # Reached base, repair and release
                         target.is_broken = False
                         target.breakdown_type = None
-                        
-                        # Unblock traffic if it was blocking
                         self.traffic_manager.repair_vehicle(target.id, target.position)
                         
-                        print(f"✅ {maint.id} successfully repaired {target.id}")
-                        
-                        # Release resources
+                        # Release resources and vehicle
                         tools = getattr(maint, 'tools', 0)
                         tow_hooks = getattr(maint, 'tow_hooks', 0)
                         self.base_manager.release_resources(tools, tow_hooks)
                         
-                        # Return to base
                         maint.target_vehicle = None
-                        base_entry = self.base_manager.get_entry_point('maintenance')
-                        
-                        if maint.position.x == base_entry.x and maint.position.y == base_entry.y:
-                            # Already at entry point, park immediately
-                            self.base_manager.park_at_base(maint.id, 'maintenance')
-                            maint.state = 'at_base'
-                            print(f"🏠 {maint.id} returned to base")
+                        maint.towing_vehicle = False
+                        print(f"✅ {maint.id} towed and repaired {target.id} at base")
                 else:
-                    # Target no longer broken, return to base
-                    base_entry = self.base_manager.get_entry_point('maintenance')
-                    if maint.position.x == base_entry.x and maint.position.y == base_entry.y:
-                        self.base_manager.park_at_base(maint.id, 'maintenance')
-                        maint.state = 'at_base'
-                        print(f"🏠 {maint.id} returned to base")
+                    # Moving to vehicle to start tow
+                    if maint.position.x != target.position.x or maint.position.y != target.position.y:
+                        dx = 1 if target.position.x > maint.position.x else (-1 if target.position.x < maint.position.x else 0)
+                        dy = 1 if target.position.y > maint.position.y else (-1 if target.position.y < maint.position.y else 0)
+                        maint.position = Position(maint.position.x + dx, maint.position.y + dy)
+                        maint.direction = (dx, dy)
+                    else:
+                        # Reached vehicle, start towing
+                        maint.towing_vehicle = True
+                        self.traffic_manager.repair_vehicle(target.id, target.position)  # Unblock rail
+                        print(f"🚛 {maint.id} started towing {target.id}")
+            else:
+                # NORMAL REPAIR (tire/engine): Move to vehicle and repair on-site
+                if maint.position.x != target.position.x or maint.position.y != target.position.y:
+                    # Move towards broken vehicle
+                    dx = 1 if target.position.x > maint.position.x else (-1 if target.position.x < maint.position.x else 0)
+                    dy = 1 if target.position.y > maint.position.y else (-1 if target.position.y < maint.position.y else 0)
+                    maint.position = Position(maint.position.x + dx, maint.position.y + dy)
+                    maint.direction = (dx, dy)
+                else:
+                    # Reached vehicle, repair it
+                    target.is_broken = False
+                    target.breakdown_type = None
+                    self.traffic_manager.repair_vehicle(target.id, target.position)
+                    
+                    print(f"✅ {maint.id} repaired {target.id}")
+                    
+                    # Release resources
+                    tools = getattr(maint, 'tools', 0)
+                    tow_hooks = getattr(maint, 'tow_hooks', 0)
+                    self.base_manager.release_resources(tools, tow_hooks)
+                    
+                    # Clear target to trigger return to base
+                    maint.target_vehicle = None
         
         # === VEHICLE MOVEMENT WITH FUEL CONSUMPTION ===
         for vehicle in self.vehicles.values():

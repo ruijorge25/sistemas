@@ -42,9 +42,14 @@ class VehicleAgent(BaseTransportAgent):
         self.current_position = assigned_route.stations[0] if assigned_route.stations else Position(0, 0)
         self.current_station_index = 0
         self.passengers = []  # List of PassengerInfo
-        self.capacity = SIMULATION_CONFIG['vehicle']['capacity']
+        # Set capacity based on vehicle type
+        if vehicle_type == 'bus':
+            self.capacity = SIMULATION_CONFIG['vehicle']['bus_capacity']
+        else:
+            self.capacity = SIMULATION_CONFIG['vehicle']['tram_capacity']
         self.fuel_level = SIMULATION_CONFIG['vehicle']['fuel_capacity']
         self.is_broken = False
+        self.breakdown_type = None  # 'tire', 'engine', or 'tow'
         self.maintenance_requested = False
         
         # Movement and scheduling
@@ -318,8 +323,13 @@ class VehicleAgent(BaseTransportAgent):
         """Monitor vehicle health and request maintenance if needed"""
         # Random breakdown check
         if not self.is_broken and random.random() < SIMULATION_CONFIG['vehicle']['breakdown_probability']:
+            # Choose random breakdown type
+            breakdown_types = ['tire', 'engine', 'tow']
+            breakdown_weights = [0.5, 0.4, 0.1]  # 50% tire, 40% engine, 10% tow
+            self.breakdown_type = random.choices(breakdown_types, weights=breakdown_weights)[0]
             self.is_broken = True
-            print(f"💥 {self.vehicle_id} has broken down at {self.current_position.x},{self.current_position.y}")
+            
+            print(f"💥 {self.vehicle_id} has broken down at {self.current_position.x},{self.current_position.y} - Type: {self.breakdown_type}")
             
             # Request maintenance
             maintenance_crews = await self.get_maintenance_agents()
@@ -330,7 +340,8 @@ class VehicleAgent(BaseTransportAgent):
                         'vehicle_id': self.vehicle_id,
                         'vehicle_type': self.vehicle_type,
                         'position': {'x': self.current_position.x, 'y': self.current_position.y},
-                        'breakdown_time': datetime.now().isoformat()
+                        'breakdown_time': datetime.now().isoformat(),
+                        'breakdown_type': self.breakdown_type
                     },
                     MESSAGE_TYPES['BREAKDOWN_ALERT']
                 )
