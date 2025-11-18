@@ -10,6 +10,7 @@ from .base_agent import BaseTransportAgent
 from ..environment.city import Position
 from ..config.settings import MESSAGE_TYPES, SIMULATION_CONFIG
 from ..protocols.contract_net import ContractNetInitiator
+from ..protocols.message_bus import message_bus
 
 class PassengerAgent(BaseTransportAgent):
     """Agent representing an individual passenger"""
@@ -64,36 +65,41 @@ class PassengerAgent(BaseTransportAgent):
         """Discover available routes and vehicles"""
         
         async def run(self):
-            if self.agent.state == 'waiting' and not self.agent.vehicle_proposals:
-                await self.agent.discover_routes()
+            while True:
+                if self.agent.state == 'waiting' and not self.agent.vehicle_proposals:
+                    await self.agent.discover_routes()
                 await asyncio.sleep(5)  # Check every 5 seconds
     
     class VehicleNegotiation(BaseTransportAgent.MessageReceiver):
         """Negotiate with vehicles for transportation"""
         
         async def run(self):
-            msg = await self.receive(timeout=1)
-            if msg:
-                msg_type = msg.get_metadata("type")
-                if msg_type == MESSAGE_TYPES['VEHICLE_CAPACITY']:
-                    await self.agent.handle_vehicle_response(msg)
-                elif msg_type == MESSAGE_TYPES['PASSENGER_REQUEST']:
-                    await self.agent.handle_booking_confirmation(msg)
+            while True:
+                msg = await message_bus.receive_message(str(self.agent.jid), timeout=1)
+                if msg:
+                    msg_type = msg.get_metadata("type")
+                    if msg_type == MESSAGE_TYPES['VEHICLE_CAPACITY']:
+                        await self.agent.handle_vehicle_response(msg)
+                    elif msg_type == MESSAGE_TYPES['PASSENGER_REQUEST']:
+                        await self.agent.handle_booking_confirmation(msg)
+                await asyncio.sleep(0.1)
     
     class PatienceMonitoring(BaseTransportAgent.MessageReceiver):
         """Monitor patience and give up if waiting too long"""
         
         async def run(self):
-            await asyncio.sleep(10)  # Check every 10 seconds
-            await self.agent.check_patience()
+            while True:
+                await asyncio.sleep(10)  # Check every 10 seconds
+                await self.agent.check_patience()
     
     class TravelMonitoring(BaseTransportAgent.MessageReceiver):
         """Monitor travel progress"""
         
         async def run(self):
-            if self.agent.state == 'traveling':
+            while True:
+                if self.agent.state == 'traveling':
+                    await self.agent.check_arrival()
                 await asyncio.sleep(5)
-                await self.agent.check_arrival()
     
     async def discover_routes(self):
         """Discover available vehicles and routes - ACTIVELY compare multiple options"""

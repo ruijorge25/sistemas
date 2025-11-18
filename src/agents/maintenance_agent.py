@@ -9,15 +9,17 @@ from typing import List, Dict, Any, Optional
 from .base_agent import BaseTransportAgent
 from ..environment.city import Position
 from ..config.settings import MESSAGE_TYPES, SIMULATION_CONFIG
+from ..protocols.message_bus import message_bus
 
 class MaintenanceAgent(BaseTransportAgent):
     """Agent representing a maintenance crew"""
     
-    def __init__(self, jid: str, password: str, crew_id: str, city):
+    def __init__(self, jid: str, password: str, crew_id: str, city, agents_registry=None):
         super().__init__(jid, password, "maintenance_crew")
         
         self.crew_id = crew_id
         self.city = city
+        self.agents_registry = agents_registry or {}  # Reference to all agents
         
         # Crew state
         self.current_position = Position(
@@ -58,25 +60,36 @@ class MaintenanceAgent(BaseTransportAgent):
         """Handle breakdown alerts from vehicles"""
         
         async def run(self):
-            msg = await self.receive(timeout=1)
-            if msg and msg.get_metadata("type") == MESSAGE_TYPES['BREAKDOWN_ALERT']:
-                await self.agent.handle_breakdown_alert(msg)
+            while True:
+                # Use local message bus
+                msg = await message_bus.receive_message(str(self.agent.jid), timeout=1)
+                if msg:
+                    msg_type = msg.get_metadata("type")
+                    if msg_type == MESSAGE_TYPES['BREAKDOWN_ALERT']:
+                        print(f"📨 {self.agent.crew_id} received BREAKDOWN_ALERT from {msg.sender}")
+                        await self.agent.handle_breakdown_alert(msg)
+                    else:
+                        print(f"📬 {self.agent.crew_id} received message type: {msg_type}")
+                await asyncio.sleep(0.1)  # Small delay to avoid busy-waiting
     
     class RepairExecution(BaseTransportAgent.MessageReceiver):
         """Execute repair jobs"""
         
         async def run(self):
-            if not self.agent.is_busy and self.agent.job_queue:
-                await self.agent.start_next_repair()
-            elif self.agent.is_busy and self.agent.current_job:
-                await self.agent.continue_repair()
+            while True:
+                if not self.agent.is_busy and self.agent.job_queue:
+                    await self.agent.start_next_repair()
+                elif self.agent.is_busy and self.agent.current_job:
+                    await self.agent.continue_repair()
+                await asyncio.sleep(1)  # Check every second
     
     class JobPrioritization(BaseTransportAgent.MessageReceiver):
         """Prioritize and manage repair jobs"""
         
         async def run(self):
-            await asyncio.sleep(10)  # Review priorities every 10 seconds
-            await self.agent.prioritize_jobs()
+            while True:
+                await asyncio.sleep(10)  # Review priorities every 10 seconds
+                await self.agent.prioritize_jobs()
     
     async def handle_breakdown_alert(self, msg):
         """Handle a vehicle breakdown alert"""
@@ -89,23 +102,30 @@ class MaintenanceAgent(BaseTransportAgent):
             breakdown_data['position']['y']
         )
         breakdown_time = datetime.fromisoformat(breakdown_data['breakdown_time'])
+        breakdown_type = breakdown_data.get('breakdown_type', 'tire')
+        
+        # Determine repair time based on breakdown type
+        repair_time_key = f'repair_time_{breakdown_type}'
+        estimated_repair_time = SIMULATION_CONFIG['maintenance'].get(repair_time_key, 5)
         
         # Create repair job
         repair_job = {
             'job_id': f"repair_{vehicle_id}_{datetime.now().timestamp()}",
             'vehicle_id': vehicle_id,
             'vehicle_type': breakdown_data.get('vehicle_type', 'bus'),
+            'breakdown_type': breakdown_type,
             'position': vehicle_position,
             'breakdown_time': breakdown_time,
             'priority': self.calculate_job_priority(vehicle_position, breakdown_time),
-            'estimated_repair_time': SIMULATION_CONFIG['maintenance']['repair_time'],
+            'estimated_repair_time': estimated_repair_time,
             'requester': str(msg.sender)
         }
         
         self.job_queue.append(repair_job)
         self.job_queue.sort(key=lambda job: job['priority'], reverse=True)
         
-        print(f"🔧 Maintenance crew {self.crew_id} received breakdown alert for {vehicle_id}")
+        print(f"🔧 {self.crew_id} received breakdown alert for {vehicle_id} (Type: {breakdown_type}, Est. time: {estimated_repair_time}s)")
+        print(f"📋 {self.crew_id} job queue now has {len(self.job_queue)} jobs")
         
         # Send acknowledgment to vehicle
         await self.send_message(
@@ -117,6 +137,7 @@ class MaintenanceAgent(BaseTransportAgent):
             },
             MESSAGE_TYPES['MAINTENANCE_REQUEST']
         )
+        print(f"✅ {self.crew_id} sent acknowledgment to {msg.sender}")
     
     def calculate_job_priority(self, vehicle_position: Position, breakdown_time: datetime) -> float:
         """Calculate priority for a repair job"""
@@ -158,6 +179,14 @@ class MaintenanceAgent(BaseTransportAgent):
         self.current_job = self.job_queue.pop(0)
         self.is_busy = True
         self.state = 'moving_to_vehicle'
+        
+        # Get reference to vehicle agent
+        vehicle_id = self.current_job['vehicle_id']
+        if self.agents_registry and vehicle_id in self.agents_registry:
+            self.target_vehicle_agent = self.agents_registry[vehicle_id]
+            print(f"🔗 {self.crew_id} locked onto {vehicle_id} agent")
+        else:
+            print(f"⚠️ {self.crew_id} could not find {vehicle_id} in registry")
         
         # Check breakdown type for TOW
         breakdown_type = self.current_job.get('breakdown_type', 'engine')
@@ -251,7 +280,10 @@ class MaintenanceAgent(BaseTransportAgent):
         if self.target_vehicle_agent:
             self.target_vehicle_agent.is_broken = False
             self.target_vehicle_agent.breakdown_type = None
+            print(f"✅ {self.crew_id} REPAIRED {vehicle_id} - Vehicle is operational again!")
             self.target_vehicle_agent = None
+        else:
+            print(f"⚠️ {self.crew_id} completed job but had no vehicle reference")
         
         # Move job to completed list
         self.current_job['completion_time'] = datetime.now()

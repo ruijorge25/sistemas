@@ -14,8 +14,9 @@ SIMULATION_CONFIG = {
         'tram_capacity': 40,  # passengers per tram
         'fuel_capacity': 100,
         'fuel_consumption_per_cell': 1,  # 1 unit per cell moved
+        'fuel_consumption_rate': 0.5,  # fuel per movement
         'speed': 1,  # grid units per time unit
-        'breakdown_probability': 0.0008,  # 0.08% per time unit
+        'breakdown_probability': 0.02,  # 2% per check - REALISTIC RATE
         'overcrowding_penalty_bus': 50,  # passengers > this = penalty
         'overcrowding_penalty_tram': 35  # passengers > this = penalty
     },
@@ -26,7 +27,7 @@ SIMULATION_CONFIG = {
     },
     'passenger': {
         'patience_time': 15,  # max waiting time
-        'arrival_rate': 0.3,  # passengers per time unit per station
+        'arrival_rate': 0.8,  # passengers per time unit per station (INCREASED for visible activity)
         'rush_hour_multiplier': 3.0
     },
     'maintenance': {

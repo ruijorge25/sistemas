@@ -5,6 +5,14 @@ Requires XMPP server running on localhost:5222
 import asyncio
 from aiohttp import web
 import json
+import sys
+import io
+
+# Fix UTF-8 encoding for Windows console to display emojis
+if sys.platform == 'win32':
+    sys.stdout.reconfigure(encoding='utf-8')
+    sys.stderr.reconfigure(encoding='utf-8')
+
 from src.environment.city import City, Route, Position
 from src.environment.base_manager import BaseManager
 from src.environment.traffic_manager import TrafficManager
@@ -111,7 +119,8 @@ class SPADEDashboardServer:
         self.app.router.add_get('/api/vehicles', self.api_vehicles)
         self.app.router.add_get('/api/stations', self.api_stations)
         self.app.router.add_get('/api/metrics', self.api_metrics)
-        self.app.router.add_get('/api/bases', self.api_bases)  # New endpoint
+        self.app.router.add_get('/api/bases', self.api_bases)
+        self.app.router.add_get('/api/city', self.api_city)  # New endpoint for city structure
     
     async def index(self, request):
         """Serve advanced dashboard"""
@@ -126,10 +135,11 @@ class SPADEDashboardServer:
     
     async def api_status(self, request):
         """API: System status"""
+        vehicle_count = len([a for a in self.agents_registry.keys() if 'vehicle' in a])
         return web.json_response({
             'status': 'running',
             'simulation_time': self.simulation_time,
-            'total_vehicles': len(self.vehicles),
+            'total_vehicles': vehicle_count,
             'total_stations': len(self.city.stations)
         })
     
@@ -144,6 +154,21 @@ class SPADEDashboardServer:
     async def api_metrics(self, request):
         """API: Performance metrics from real SPADE agents"""
         return web.json_response(self.calculate_real_metrics())
+    
+    async def api_city(self, request):
+        """API: City structure for visualization"""
+        return web.json_response({
+            'grid_size': self.city.grid_size,
+            'stations': [[s.x, s.y] for s in self.city.stations],
+            'routes': [
+                {
+                    'id': r.route_id,
+                    'vehicle_type': r.vehicle_type,
+                    'stations': [[s.x, s.y] for s in r.stations]
+                }
+                for r in self.city.routes
+            ]
+        })
     
     async def update_simulation(self):
         """Update simulation time counter"""
@@ -163,22 +188,14 @@ class SPADEDashboardServer:
         asyncio.create_task(self.update_simulation())
 
 async def create_spade_agents(city, base_manager, traffic_manager):
-    """Create and start real SPADE agents"""
+    """Create and initialize SPADE agents with manual behavior execution"""
     agents = {}
     
-    print("🤖 Creating SPADE agents...")
+    print("🤖 Creating SPADE agents with autonomous behaviors...")
     
-    # NO XMPP MODE - Use local memory instead
-    use_xmpp = False  # Set to True if XMPP server is running
-    
-    if use_xmpp:
-        xmpp_server = "localhost"
-        xmpp_domain = "@localhost"
-        password = "password"
-    else:
-        # Use dummy JIDs for local mode
-        xmpp_domain = "@local"
-        password = "local"
+    # Local mode - no XMPP connection
+    xmpp_domain = "@local"
+    password = "local"
     
     # Define base positions
     base_positions = {
@@ -191,32 +208,51 @@ async def create_spade_agents(city, base_manager, traffic_manager):
     for i, station_pos in enumerate(city.stations[:15]):
         jid = f"station{i}{xmpp_domain}"
         agent = StationAgent(jid, password, f"station_{i}", station_pos)
+        # Manually call setup to initialize behaviors WITHOUT starting XMPP connection
+        await agent.setup()
         agents[f"station_{i}"] = agent
-        if use_xmpp:
-            await agent.start()
     
-    print(f"✅ Created {15} Station Agents")
+    print(f"✅ Created {15} Station Agents with behaviors")
     
     # Create Vehicle Agents
     for i in range(10):
         vehicle_type = 'bus' if i < 6 else 'tram'
         jid = f"vehicle{i}{xmpp_domain}"
         
-        # Create simple route with vehicle_type
+        # Create route
         route_stations = random.sample(city.stations, k=min(5, len(city.stations)))
         route = Route(id=f"route_{i}", stations=route_stations, vehicle_type=vehicle_type)
         
         agent = VehicleAgent(jid, password, f"vehicle_{i}", vehicle_type, route, city)
+        # Manually call setup to initialize behaviors
+        await agent.setup()
         agents[f"vehicle_{i}"] = agent
-        if use_xmpp:
-            await agent.start()
     
-    print(f"✅ Created {10} Vehicle Agents")
+    print(f"✅ Created {10} Vehicle Agents with behaviors")
     
-    # Create Maintenance Agents at base
+    # Create Passenger Agents (20 passengers with random origins/destinations)
+    num_passengers = 20
+    for i in range(num_passengers):
+        jid = f"passenger{i}{xmpp_domain}"
+        
+        # Random origin and destination from city stations
+        origin_station = random.choice(city.stations)
+        destination_station = random.choice([s for s in city.stations if s != origin_station])
+        
+        agent = PassengerAgent(
+            jid, password, f"pass_{i}", 
+            origin_station, destination_station, city
+        )
+        # Manually call setup to initialize behaviors
+        await agent.setup()
+        agents[f"pass_{i}"] = agent
+    
+    print(f"✅ Created {num_passengers} Passenger Agents with behaviors")
+    
+    # Create Maintenance Agents
     for i in range(3):
         jid = f"maintenance{i}{xmpp_domain}"
-        agent = MaintenanceAgent(jid, password, f"maint_{i}", city)
+        agent = MaintenanceAgent(jid, password, f"maint_{i}", city, agents_registry=agents)
         agent.base_position = base_positions['maintenance']
         agent.current_position = base_positions['maintenance']
         agent.base_manager = base_manager
@@ -226,113 +262,58 @@ async def create_spade_agents(city, base_manager, traffic_manager):
         base_manager.register_agent(f"maint_{i}", agent)
         base_manager.park_at_base(f"maint_{i}", 'maintenance')
         
+        # Manually call setup to initialize behaviors
+        await agent.setup()
         agents[f"maint_{i}"] = agent
-        if use_xmpp:
-            await agent.start()
         
-        print(f"🏠 maint_{i} parked at Maintenance Base")
+        print(f"🏠 maint_{i} parked at Maintenance Base with behaviors active")
     
-    print(f"✅ Created {3} Maintenance Agents")
+    print(f"✅ Created {3} Maintenance Agents with behaviors")
+    
+    # Connect agents - give vehicles reference to maintenance crews
+    maintenance_jids = [str(agents[f"maint_{i}"].jid) for i in range(3)]
+    for agent_id, agent in agents.items():
+        if 'vehicle' in agent_id:
+            agent.maintenance_crews_jids = maintenance_jids
+            print(f"🔗 {agent_id} connected to {len(maintenance_jids)} maintenance crews")
+    
+    # Behaviors are added via agent.add_behaviour() but need to be started manually
+    # since we're not using SPADE's XMPP connection (local mode)
+    print("🎬 Starting agent behavior execution...")
+    
+    behavior_count = 0
+    for agent_id, agent in agents.items():
+        for behaviour in agent.behaviours:
+            # Start behavior by calling its run() method as a task
+            if hasattr(behaviour, 'run'):
+                asyncio.create_task(behaviour.run())
+                behavior_count += 1
+            else:
+                print(f"⚠️ Behavior {behaviour.__class__.__name__} in {agent_id} has no run() method!")
+    
+    print(f"✅ Started {behavior_count} behaviors across {len(agents)} agents!")
     
     return agents
 
 async def simulation_loop(agents_registry, base_manager, traffic_manager):
-    """Main simulation loop that updates all agents"""
-    import time as time_module
+    """Keep simulation alive - agents work autonomously via their behaviors"""
+    simulation_time = 0
+    
+    print("✅ Simulation running - agents operating autonomously")
+    print("📡 Agents communicate via ACL messages")
+    print("🤝 Contract Net Protocol active for maintenance negotiations")
+    
     while True:
-        await asyncio.sleep(2)  # Update every 2 seconds
-        
-        # Update vehicle positions and check for breakdowns
-        for agent_id, agent in agents_registry.items():
-            if 'vehicle' in agent_id:
-                # Simple movement simulation
-                if not agent.is_broken and agent.next_station:
-                    # Move towards next station (simplified)
-                    target = agent.next_station
-                    dx = target.x - agent.current_position.x
-                    dy = target.y - agent.current_position.y
-                    
-                    # Create new Position instead of modifying frozen dataclass
-                    if abs(dx) > abs(dy) and dx != 0:
-                        new_x = agent.current_position.x + (1 if dx > 0 else -1)
-                        agent.current_position = Position(new_x, agent.current_position.y)
-                    elif dy != 0:
-                        new_y = agent.current_position.y + (1 if dy > 0 else -1)
-                        agent.current_position = Position(agent.current_position.x, new_y)
-                    
-                    # Check if reached station
-                    if agent.current_position.x == target.x and agent.current_position.y == target.y:
-                        # Move to next station in route
-                        agent.current_station_index = (agent.current_station_index + 1) % len(agent.assigned_route.stations)
-                        agent.next_station = agent.assigned_route.stations[agent.current_station_index]
-                
-                # Random breakdown check
-                await agent.check_vehicle_health()
-                
-                # Dispatch maintenance if broken
-                if agent.is_broken and not agent.maintenance_requested:
-                    await dispatch_maintenance(agent, agents_registry, base_manager, time_module)
-                    agent.maintenance_requested = True
-        
-        # Update maintenance crews
-        for agent_id, agent in agents_registry.items():
-            if 'maint_' in agent_id:
-                await agent.continue_repair()
-
-async def dispatch_maintenance(vehicle, agents_registry, base_manager, time_module):
-    """Dispatch maintenance crew to broken vehicle"""
-    # Find available maintenance crew
-    available_crews = base_manager.get_agents_at_base('maintenance')
-    
-    if not available_crews:
-        print(f"⚠️ No maintenance vehicles available at base for {vehicle.vehicle_id}")
-        return
-    
-    # Get first available crew
-    crew_id = list(available_crews)[0]
-    maint = agents_registry.get(crew_id)
-    
-    if not maint:
-        return
-    
-    # Check resources
-    breakdown_type = vehicle.breakdown_type
-    resources_needed = BREAKDOWN_TYPES.get(breakdown_type, {'tools': 2, 'tow_hooks': 0})
-    
-    if not base_manager.allocate_resources(resources_needed['tools'], resources_needed['tow_hooks']):
-        print(f"❌ Insufficient resources! Need {resources_needed['tools']} tools and {resources_needed['tow_hooks']} tow hooks")
-        print(f"   Available: {base_manager.available_tools} tools, {base_manager.available_tow_hooks} tow hooks")
-        print(f"⚠️ Insufficient resources for {vehicle.vehicle_id} ({breakdown_type})")
-        return
-    
-    # Deploy maintenance crew
-    base_manager.deploy_agent(crew_id, 'maintenance')
-    
-    # Create repair job
-    from datetime import datetime
-    maint.job_queue.append({
-        'job_id': f"repair_{vehicle.vehicle_id}",
-        'vehicle_id': vehicle.vehicle_id,
-        'vehicle_type': vehicle.vehicle_type,
-        'position': Position(vehicle.current_position.x, vehicle.current_position.y),
-        'breakdown_time': datetime.now(),
-        'breakdown_type': breakdown_type,
-        'estimated_repair_time': 15,  # seconds
-        'priority': 1.0
-    })
-    
-    # Store allocated resources
-    maint.allocated_resources = resources_needed
-    maint.target_vehicle_agent = vehicle
-    
-    print(f"🔧 Resources allocated: {resources_needed['tools']} tools, {resources_needed['tow_hooks']} tow hooks")
-    print(f"   Remaining: {base_manager.available_tools} tools, {base_manager.available_tow_hooks} tow hooks")
-    print(f"🚀 {crew_id} deployed from Maintenance Base at Position({maint.base_position.x}, {maint.base_position.y})")
-    print(f"🚑 {crew_id} deployed from base to repair {vehicle.vehicle_id} ({breakdown_type})")
-    print(f"   Resources: {resources_needed['tools']} tools, {resources_needed['tow_hooks']} tow hooks")
-    
-    # Start repair process
-    await maint.start_next_repair()
+        try:
+            await asyncio.sleep(5)  # Just keep alive, agents do their own work
+            simulation_time += 5
+            
+            if simulation_time % 60 == 0:  # Every 60 seconds
+                minutes = simulation_time // 60
+                print(f"⏱️ Uptime: {minutes}m - {len(agents_registry)} agents active")
+        except Exception as e:
+            print(f"⚠️ Error in simulation loop: {e}")
+            continue
 
 async def main():
     print("🚌 Starting SPADE Multi-Agent Transportation System")

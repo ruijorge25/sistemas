@@ -14,6 +14,7 @@ from ..config.settings import MESSAGE_TYPES, SIMULATION_CONFIG
 from ..ml.learning import QLearningRouter, ReinforcementLearner
 from ..protocols.contract_net import ContractNetParticipant
 from .cooperation import VehicleCoordinator
+from ..protocols.message_bus import message_bus
 
 @dataclass
 class PassengerInfo:
@@ -109,73 +110,82 @@ class VehicleAgent(BaseTransportAgent):
         """Handle vehicle movement along routes - REACTS TO TRAFFIC"""
         
         async def run(self):
-            # Check for traffic/weather events affecting speed
-            if self.agent.event_manager:
-                pos = (self.agent.current_position.x, self.agent.current_position.y)
-                self.agent.traffic_modifier = self.agent.event_manager.get_traffic_modifier(pos)
+            while True:
+                # Check for traffic/weather events affecting speed
+                if self.agent.event_manager:
+                    pos = (self.agent.current_position.x, self.agent.current_position.y)
+                    self.agent.traffic_modifier = self.agent.event_manager.get_traffic_modifier(pos)
+                    
+                    # Check if route is blocked
+                    if self.agent.event_manager.is_route_blocked(pos):
+                        print(f"🚧 Vehicle {self.agent.vehicle_id} route blocked! Rerouting...")
+                        await self.agent.find_alternative_route()
+                        self.agent.route_adaptations += 1
                 
-                # Check if route is blocked
-                if self.agent.event_manager.is_route_blocked(pos):
-                    print(f"🚧 Vehicle {self.agent.vehicle_id} route blocked! Rerouting...")
-                    await self.agent.find_alternative_route()
-                    self.agent.route_adaptations += 1
-            
-            # Adjust sleep based on traffic modifier
-            base_time = SIMULATION_CONFIG['simulation']['time_step']
-            adjusted_time = base_time / max(0.3, self.agent.traffic_modifier)
-            await asyncio.sleep(adjusted_time)
-            
-            if not self.agent.is_broken and self.agent.next_station:
-                await self.agent.move_towards_next_station()
+                # Adjust sleep based on traffic modifier
+                base_time = SIMULATION_CONFIG['simulation']['time_step']
+                adjusted_time = base_time / max(0.3, self.agent.traffic_modifier)
+                await asyncio.sleep(adjusted_time)
+                
+                if not self.agent.is_broken and self.agent.next_station:
+                    await self.agent.move_towards_next_station()
     
     class PassengerManagement(BaseTransportAgent.MessageReceiver):
         """Manage passenger boarding and alighting"""
         
         async def run(self):
-            msg = await self.receive(timeout=1)
-            if msg and msg.get_metadata("type") == MESSAGE_TYPES['PASSENGER_REQUEST']:
-                await self.agent.handle_passenger_request(msg)
+            while True:
+                msg = await message_bus.receive_message(str(self.agent.jid), timeout=1)
+                if msg and msg.get_metadata("type") == MESSAGE_TYPES['PASSENGER_REQUEST']:
+                    await self.agent.handle_passenger_request(msg)
+                await asyncio.sleep(0.1)
     
     class CapacityNegotiation(BaseTransportAgent.MessageReceiver):
         """Negotiate with stations about capacity and routing"""
         
         async def run(self):
-            msg = await self.receive(timeout=1)
-            if msg and msg.get_metadata("type") == MESSAGE_TYPES['STATION_DEMAND']:
-                await self.agent.handle_capacity_request(msg)
+            while True:
+                msg = await message_bus.receive_message(str(self.agent.jid), timeout=1)
+                if msg and msg.get_metadata("type") == MESSAGE_TYPES['STATION_DEMAND']:
+                    await self.agent.handle_capacity_request(msg)
+                await asyncio.sleep(0.1)
     
     class MaintenanceMonitoring(BaseTransportAgent.MessageReceiver):
         """Monitor vehicle health and request maintenance"""
         
         async def run(self):
-            await asyncio.sleep(10)  # Check every 10 seconds
-            await self.agent.check_vehicle_health()
+            while True:
+                await asyncio.sleep(10)  # Check every 10 seconds
+                await self.agent.check_vehicle_health()
     
     class RouteAdaptation(BaseTransportAgent.MessageReceiver):
         """Dynamically adapt routes based on conditions"""
         
         async def run(self):
-            await asyncio.sleep(20)  # Check every 20 seconds
-            if self.agent.route_adapter and not self.agent.is_broken:
-                await self.agent.route_adapter.evaluate_and_adapt()
+            while True:
+                await asyncio.sleep(20)  # Check every 20 seconds
+                if self.agent.route_adapter and not self.agent.is_broken:
+                    await self.agent.route_adapter.evaluate_and_adapt()
     
     class ContractNetHandler(BaseTransportAgent.MessageReceiver):
         """Handle Contract Net Protocol messages"""
         
         async def run(self):
-            msg = await self.receive(timeout=1)
-            if msg:
-                msg_type = msg.metadata.get('type', '')
-                
-                if msg_type == MESSAGE_TYPES['CONTRACT_NET_CFP']:
-                    # Received Call for Proposals
-                    await self.agent.cnp_participant.handle_cfp(msg)
-                elif msg_type == MESSAGE_TYPES['CONTRACT_NET_ACCEPT']:
-                    # Contract awarded
-                    await self.agent.cnp_participant.handle_contract_result(msg)
-                elif msg_type == MESSAGE_TYPES['CONTRACT_NET_REJECT']:
-                    # Contract rejected
-                    await self.agent.cnp_participant.handle_contract_result(msg)
+            while True:
+                msg = await message_bus.receive_message(str(self.agent.jid), timeout=1)
+                if msg:
+                    msg_type = msg.metadata.get('type', '')
+                    
+                    if msg_type == MESSAGE_TYPES['CONTRACT_NET_CFP']:
+                        # Received Call for Proposals
+                        await self.agent.cnp_participant.handle_cfp(msg)
+                    elif msg_type == MESSAGE_TYPES['CONTRACT_NET_ACCEPT']:
+                        # Contract awarded
+                        await self.agent.cnp_participant.handle_contract_result(msg)
+                    elif msg_type == MESSAGE_TYPES['CONTRACT_NET_REJECT']:
+                        # Contract rejected
+                        await self.agent.cnp_participant.handle_contract_result(msg)
+                await asyncio.sleep(0.1)
     
     async def move_towards_next_station(self):
         """Move the vehicle towards its next station"""
@@ -206,8 +216,10 @@ class VehicleAgent(BaseTransportAgent):
                 move_x = (dx / distance) * movement_speed
                 move_y = (dy / distance) * movement_speed
                 
-                self.current_position.x += move_x
-                self.current_position.y += move_y
+                # Create new Position object (frozen dataclass)
+                new_x = self.current_position.x + move_x
+                new_y = self.current_position.y + move_y
+                self.current_position = Position(int(new_x), int(new_y))
     
     async def arrive_at_station(self):
         """Handle arrival at a station"""
@@ -218,6 +230,8 @@ class VehicleAgent(BaseTransportAgent):
         current_time = datetime.now()
         if current_time <= self.estimated_arrival_time:
             self.on_time_arrivals += 1
+        
+        print(f"🚌 {self.vehicle_id} arrived at station ({self.current_position.x},{self.current_position.y})")
         
         # Handle passenger alighting
         await self.handle_passenger_alighting()
@@ -244,8 +258,6 @@ class VehicleAgent(BaseTransportAgent):
         distance_to_next = self.current_position.distance_to(self.next_station)
         travel_time_minutes = (distance_to_next / SIMULATION_CONFIG['vehicle']['speed']) * 2
         self.estimated_arrival_time = current_time + timedelta(minutes=travel_time_minutes)
-        
-        print(f"🚌 {self.vehicle_id} arrived at station {self.current_position.x},{self.current_position.y}")
     
     async def handle_passenger_alighting(self):
         """Handle passengers leaving the vehicle"""
@@ -331,8 +343,10 @@ class VehicleAgent(BaseTransportAgent):
             
             print(f"💥 {self.vehicle_id} has broken down at {self.current_position.x},{self.current_position.y} - Type: {self.breakdown_type}")
             
-            # Request maintenance
+            # Request maintenance via ACL messages
             maintenance_crews = await self.get_maintenance_agents()
+            print(f"📡 {self.vehicle_id} sending BREAKDOWN_ALERT to {len(maintenance_crews)} maintenance crews...")
+            
             for crew in maintenance_crews:
                 await self.send_message(
                     crew,
@@ -345,6 +359,7 @@ class VehicleAgent(BaseTransportAgent):
                     },
                     MESSAGE_TYPES['BREAKDOWN_ALERT']
                 )
+                print(f"✉️ BREAKDOWN_ALERT sent to {crew}")
         
         # Check fuel level
         if self.fuel_level < 20:
@@ -358,9 +373,8 @@ class VehicleAgent(BaseTransportAgent):
     
     async def get_maintenance_agents(self) -> List[str]:
         """Get maintenance crew agent JIDs"""
-        # This would be populated by the simulation coordinator
-        # For now, return empty list
-        return []
+        # Return maintenance crew JIDs set by simulation coordinator
+        return getattr(self, 'maintenance_crews_jids', [])
     
     async def update_status(self):
         """Update vehicle status metrics"""

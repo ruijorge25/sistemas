@@ -12,6 +12,7 @@ from ..environment.city import Position
 from ..config.settings import MESSAGE_TYPES, SIMULATION_CONFIG
 from ..ml.learning import DemandPredictor, PatternRecognizer
 from ..protocols.contract_net import ContractNetInitiator
+from ..protocols.message_bus import message_bus
 
 class StationAgent(BaseTransportAgent):
     """Agent representing a bus stop or tram station"""
@@ -71,70 +72,77 @@ class StationAgent(BaseTransportAgent):
         """Simulate passenger arrivals - REACTS TO CONCERTS/EVENTS"""
         
         async def run(self):
-            await asyncio.sleep(random.uniform(1, 3))  # Random arrival intervals
-            
-            # Check if new passengers arrive
-            arrival_rate = SIMULATION_CONFIG['passenger']['arrival_rate']
-            
-            # Adjust for rush hour
-            current_hour = datetime.now().hour
-            rush_hours = SIMULATION_CONFIG['simulation']['rush_hours']
-            for start_hour, end_hour in rush_hours:
-                if start_hour <= current_hour <= end_hour:
-                    arrival_rate *= SIMULATION_CONFIG['passenger']['rush_hour_multiplier']
-                    break
-            
-            # IMPROVEMENT: Check for dynamic events (concerts, surges)
-            if self.agent.event_manager:
-                pos = (self.agent.position.x, self.agent.position.y)
-                self.agent.demand_modifier = self.agent.event_manager.get_demand_modifier(pos)
-                arrival_rate *= self.agent.demand_modifier
+            while True:
+                await asyncio.sleep(random.uniform(1, 3))  # Random arrival intervals
                 
-                if self.agent.demand_modifier > 2.0:
-                    print(f"📈 Station {self.agent.station_id} experiencing {self.agent.demand_modifier:.1f}x demand surge!")
-            
-            if random.random() < arrival_rate:
-                await self.agent.add_passenger_to_queue()
+                # Check if new passengers arrive
+                arrival_rate = SIMULATION_CONFIG['passenger']['arrival_rate']
+                
+                # Adjust for rush hour
+                current_hour = datetime.now().hour
+                rush_hours = SIMULATION_CONFIG['simulation']['rush_hours']
+                for start_hour, end_hour in rush_hours:
+                    if start_hour <= current_hour <= end_hour:
+                        arrival_rate *= SIMULATION_CONFIG['passenger']['rush_hour_multiplier']
+                        break
+                
+                # IMPROVEMENT: Check for dynamic events (concerts, surges)
+                if self.agent.event_manager:
+                    pos = (self.agent.position.x, self.agent.position.y)
+                    self.agent.demand_modifier = self.agent.event_manager.get_demand_modifier(pos)
+                    arrival_rate *= self.agent.demand_modifier
+                    
+                    if self.agent.demand_modifier > 2.0:
+                        print(f"📈 Station {self.agent.station_id} experiencing {self.agent.demand_modifier:.1f}x demand surge!")
+                
+                if random.random() < arrival_rate:
+                    await self.agent.add_passenger_to_queue()
     
     class VehicleMonitoring(BaseTransportAgent.MessageReceiver):
         """Monitor vehicle arrivals and capacity"""
         
         async def run(self):
-            msg = await self.receive(timeout=1)
-            if msg:
-                msg_type = msg.get_metadata("type")
-                if msg_type == MESSAGE_TYPES['VEHICLE_CAPACITY']:
-                    await self.agent.handle_vehicle_arrival(msg)
+            while True:
+                msg = await message_bus.receive_message(str(self.agent.jid), timeout=1)
+                if msg:
+                    msg_type = msg.get_metadata("type")
+                    if msg_type == MESSAGE_TYPES['VEHICLE_CAPACITY']:
+                        await self.agent.handle_vehicle_arrival(msg)
+                await asyncio.sleep(0.1)
     
     class DemandForecasting(BaseTransportAgent.MessageReceiver):
         """Forecast passenger demand and share with nearby stations"""
         
         async def run(self):
-            await asyncio.sleep(30)  # Update forecast every 30 seconds
-            await self.agent.update_demand_forecast()
-            await self.agent.share_demand_forecast()
+            while True:
+                await asyncio.sleep(30)  # Update forecast every 30 seconds
+                await self.agent.update_demand_forecast()
+                await self.agent.share_demand_forecast()
     
     class ServiceRequestManagement(BaseTransportAgent.MessageReceiver):
         """Manage requests for additional vehicle service"""
         
         async def run(self):
-            await asyncio.sleep(5)  # Check every 5 seconds
-            await self.agent.check_service_needs()
+            while True:
+                await asyncio.sleep(5)  # Check every 5 seconds
+                await self.agent.check_service_needs()
     
     class ContractNetHandler(BaseTransportAgent.MessageReceiver):
         """Handle Contract Net Protocol messages"""
         
         async def run(self):
-            msg = await self.receive(timeout=1)
-            if msg:
-                msg_type = msg.metadata.get('type', '')
-                
-                if msg_type == MESSAGE_TYPES['CONTRACT_NET_PROPOSE']:
-                    # Received proposal from vehicle
-                    await self.agent.cnp_initiator.handle_proposal(msg)
-                elif msg_type == MESSAGE_TYPES['CONTRACT_NET_INFORM']:
-                    # Contract execution completed
-                    await self.agent.handle_contract_completion(msg)
+            while True:
+                msg = await message_bus.receive_message(str(self.agent.jid), timeout=1)
+                if msg:
+                    msg_type = msg.metadata.get('type', '')
+                    
+                    if msg_type == MESSAGE_TYPES['CONTRACT_NET_PROPOSE']:
+                        # Received proposal from vehicle
+                        await self.agent.cnp_initiator.handle_proposal(msg)
+                    elif msg_type == MESSAGE_TYPES['CONTRACT_NET_INFORM']:
+                        # Contract execution completed
+                        await self.agent.handle_contract_completion(msg)
+                await asyncio.sleep(0.1)
     
     async def add_passenger_to_queue(self):
         """Add a new passenger to the station queue"""
