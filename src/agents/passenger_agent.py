@@ -74,15 +74,18 @@ class PassengerAgent(BaseTransportAgent):
         """Negotiate with vehicles for transportation"""
         
         async def run(self):
+            subscription = self.agent.subscribe_to_messages([
+                MESSAGE_TYPES['VEHICLE_CAPACITY'],
+                MESSAGE_TYPES['PASSENGER_REQUEST']
+            ])
             while True:
-                msg = await message_bus.receive_message(str(self.agent.jid), timeout=1)
+                msg = await subscription.get()
                 if msg:
                     msg_type = msg.get_metadata("type")
                     if msg_type == MESSAGE_TYPES['VEHICLE_CAPACITY']:
                         await self.agent.handle_vehicle_response(msg)
                     elif msg_type == MESSAGE_TYPES['PASSENGER_REQUEST']:
                         await self.agent.handle_booking_confirmation(msg)
-                await asyncio.sleep(0.1)
     
     class PatienceMonitoring(BaseTransportAgent.MessageReceiver):
         """Monitor patience and give up if waiting too long"""

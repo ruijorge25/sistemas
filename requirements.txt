@@ -1,8 +1,18 @@
 # Requirements for Multi-Agent Transportation System
+
+# Core SPADE framework
 spade>=3.2.0
+
+# Web dashboard
 aiohttp>=3.8.0
 aiohttp-jinja2>=1.5.0
-asyncio-mqtt>=0.11.0
-matplotlib>=3.5.0
+
+# Testing
+pytest>=7.0.0
+pytest-asyncio>=0.21.0
+
+# Data processing and visualization
 numpy>=1.21.0
-loguru>=0.6.0
+
+# Note: asyncio-mqtt, loguru, matplotlib were removed (not used in codebase)
+# Note: requests is NOT needed - tests that used it were removed

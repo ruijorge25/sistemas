@@ -1,5 +1,13 @@
 # Configuration for the Multi-Agent Transportation System
 
+# XMPP Server Configuration
+XMPP_CONFIG = {
+    'server': 'localhost',
+    'port': 5222,
+    'domain': 'localhost',
+    'password': 'spade123'  # Default password for all agents
+}
+
 SIMULATION_CONFIG = {
     'city': {
         'name': 'SimCity Transport',

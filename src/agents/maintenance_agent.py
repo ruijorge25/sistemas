@@ -60,17 +60,12 @@ class MaintenanceAgent(BaseTransportAgent):
         """Handle breakdown alerts from vehicles"""
         
         async def run(self):
+            subscription = self.agent.subscribe_to_messages([MESSAGE_TYPES['BREAKDOWN_ALERT']])
             while True:
-                # Use local message bus
-                msg = await message_bus.receive_message(str(self.agent.jid), timeout=1)
+                msg = await subscription.get()
                 if msg:
-                    msg_type = msg.get_metadata("type")
-                    if msg_type == MESSAGE_TYPES['BREAKDOWN_ALERT']:
-                        print(f"📨 {self.agent.crew_id} received BREAKDOWN_ALERT from {msg.sender}")
-                        await self.agent.handle_breakdown_alert(msg)
-                    else:
-                        print(f"📬 {self.agent.crew_id} received message type: {msg_type}")
-                await asyncio.sleep(0.1)  # Small delay to avoid busy-waiting
+                    print(f"📨 {self.agent.crew_id} received BREAKDOWN_ALERT from {msg.sender}")
+                    await self.agent.handle_breakdown_alert(msg)
     
     class RepairExecution(BaseTransportAgent.MessageReceiver):
         """Execute repair jobs"""

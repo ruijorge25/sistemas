@@ -16,7 +16,7 @@ if sys.platform == 'win32':
 from src.environment.city import City, Route, Position
 from src.environment.base_manager import BaseManager
 from src.environment.traffic_manager import TrafficManager
-from src.config.settings import SIMULATION_CONFIG, BREAKDOWN_TYPES
+from src.config.settings import SIMULATION_CONFIG, BREAKDOWN_TYPES, XMPP_CONFIG
 from src.agents.vehicle_agent import VehicleAgent
 from src.agents.station_agent import StationAgent
 from src.agents.passenger_agent import PassengerAgent
@@ -188,14 +188,17 @@ class SPADEDashboardServer:
         asyncio.create_task(self.update_simulation())
 
 async def create_spade_agents(city, base_manager, traffic_manager):
-    """Create and initialize SPADE agents with manual behavior execution"""
+    """Create and start real SPADE agents with XMPP"""
     agents = {}
     
-    print("🤖 Creating SPADE agents with autonomous behaviors...")
+    print("🤖 Creating SPADE agents with XMPP connection...")
     
-    # Local mode - no XMPP connection
-    xmpp_domain = "@local"
-    password = "local"
+    # XMPP credentials
+    xmpp_domain = f"@{XMPP_CONFIG['domain']}"
+    password = XMPP_CONFIG['password']
+    
+    print(f"🔑 Using XMPP server: {XMPP_CONFIG['server']}:{XMPP_CONFIG['port']}")
+    print(f"🌐 Domain: {XMPP_CONFIG['domain']}")
     
     # Define base positions
     base_positions = {
@@ -277,21 +280,17 @@ async def create_spade_agents(city, base_manager, traffic_manager):
             agent.maintenance_crews_jids = maintenance_jids
             print(f"🔗 {agent_id} connected to {len(maintenance_jids)} maintenance crews")
     
-    # Behaviors are added via agent.add_behaviour() but need to be started manually
-    # since we're not using SPADE's XMPP connection (local mode)
-    print("🎬 Starting agent behavior execution...")
+    # Start all agents using SPADE's start() method
+    print("🎬 Starting agents with XMPP connection...")
     
-    behavior_count = 0
+    start_tasks = []
     for agent_id, agent in agents.items():
-        for behaviour in agent.behaviours:
-            # Start behavior by calling its run() method as a task
-            if hasattr(behaviour, 'run'):
-                asyncio.create_task(behaviour.run())
-                behavior_count += 1
-            else:
-                print(f"⚠️ Behavior {behaviour.__class__.__name__} in {agent_id} has no run() method!")
+        start_tasks.append(agent.start())
     
-    print(f"✅ Started {behavior_count} behaviors across {len(agents)} agents!")
+    # Wait for all agents to connect to XMPP server
+    await asyncio.gather(*start_tasks)
+    
+    print(f"✅ Started {len(agents)} agents with XMPP!")
     
     return agents
 
@@ -318,7 +317,7 @@ async def simulation_loop(agents_registry, base_manager, traffic_manager):
 async def main():
     print("🚌 Starting SPADE Multi-Agent Transportation System")
     print("=" * 60)
-    print("🎯 Running in LOCAL MODE (no XMPP required)")
+    print("🎯 Running in XMPP MODE (requires XMPP server)")
     print("=" * 60)
     
     try:
@@ -371,7 +370,7 @@ async def main():
         print("\n" + "=" * 60)
         print("✅ SYSTEM READY!")
         print("🌐 Dashboard: http://localhost:8080")
-        print("🤖 SPADE Agents: Active in local mode")
+        print("🤖 SPADE Agents: Connected via XMPP")
         print("🎬 Dynamic Events: Traffic jams, concerts, weather, accidents")
         print("📊 Metrics: Real-time calculation from agents")
         print("=" * 60)

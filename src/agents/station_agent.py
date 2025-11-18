@@ -102,13 +102,11 @@ class StationAgent(BaseTransportAgent):
         """Monitor vehicle arrivals and capacity"""
         
         async def run(self):
+            subscription = self.agent.subscribe_to_messages([MESSAGE_TYPES['VEHICLE_CAPACITY']])
             while True:
-                msg = await message_bus.receive_message(str(self.agent.jid), timeout=1)
+                msg = await subscription.get()
                 if msg:
-                    msg_type = msg.get_metadata("type")
-                    if msg_type == MESSAGE_TYPES['VEHICLE_CAPACITY']:
-                        await self.agent.handle_vehicle_arrival(msg)
-                await asyncio.sleep(0.1)
+                    await self.agent.handle_vehicle_arrival(msg)
     
     class DemandForecasting(BaseTransportAgent.MessageReceiver):
         """Forecast passenger demand and share with nearby stations"""
@@ -131,8 +129,12 @@ class StationAgent(BaseTransportAgent):
         """Handle Contract Net Protocol messages"""
         
         async def run(self):
+            subscription = self.agent.subscribe_to_messages([
+                MESSAGE_TYPES['CONTRACT_NET_PROPOSE'],
+                MESSAGE_TYPES['CONTRACT_NET_INFORM']
+            ])
             while True:
-                msg = await message_bus.receive_message(str(self.agent.jid), timeout=1)
+                msg = await subscription.get()
                 if msg:
                     msg_type = msg.metadata.get('type', '')
                     
@@ -142,7 +144,6 @@ class StationAgent(BaseTransportAgent):
                     elif msg_type == MESSAGE_TYPES['CONTRACT_NET_INFORM']:
                         # Contract execution completed
                         await self.agent.handle_contract_completion(msg)
-                await asyncio.sleep(0.1)
     
     async def add_passenger_to_queue(self):
         """Add a new passenger to the station queue"""

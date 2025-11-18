@@ -134,21 +134,21 @@ class VehicleAgent(BaseTransportAgent):
         """Manage passenger boarding and alighting"""
         
         async def run(self):
+            subscription = self.agent.subscribe_to_messages([MESSAGE_TYPES['PASSENGER_REQUEST']])
             while True:
-                msg = await message_bus.receive_message(str(self.agent.jid), timeout=1)
-                if msg and msg.get_metadata("type") == MESSAGE_TYPES['PASSENGER_REQUEST']:
+                msg = await subscription.get()
+                if msg:
                     await self.agent.handle_passenger_request(msg)
-                await asyncio.sleep(0.1)
     
     class CapacityNegotiation(BaseTransportAgent.MessageReceiver):
         """Negotiate with stations about capacity and routing"""
         
         async def run(self):
+            subscription = self.agent.subscribe_to_messages([MESSAGE_TYPES['STATION_DEMAND']])
             while True:
-                msg = await message_bus.receive_message(str(self.agent.jid), timeout=1)
-                if msg and msg.get_metadata("type") == MESSAGE_TYPES['STATION_DEMAND']:
+                msg = await subscription.get()
+                if msg:
                     await self.agent.handle_capacity_request(msg)
-                await asyncio.sleep(0.1)
     
     class MaintenanceMonitoring(BaseTransportAgent.MessageReceiver):
         """Monitor vehicle health and request maintenance"""
@@ -171,8 +171,13 @@ class VehicleAgent(BaseTransportAgent):
         """Handle Contract Net Protocol messages"""
         
         async def run(self):
+            subscription = self.agent.subscribe_to_messages([
+                MESSAGE_TYPES['CONTRACT_NET_CFP'],
+                MESSAGE_TYPES['CONTRACT_NET_ACCEPT'],
+                MESSAGE_TYPES['CONTRACT_NET_REJECT']
+            ])
             while True:
-                msg = await message_bus.receive_message(str(self.agent.jid), timeout=1)
+                msg = await subscription.get()
                 if msg:
                     msg_type = msg.metadata.get('type', '')
                     
@@ -185,7 +190,6 @@ class VehicleAgent(BaseTransportAgent):
                     elif msg_type == MESSAGE_TYPES['CONTRACT_NET_REJECT']:
                         # Contract rejected
                         await self.agent.cnp_participant.handle_contract_result(msg)
-                await asyncio.sleep(0.1)
     
     async def move_towards_next_station(self):
         """Move the vehicle towards its next station"""
