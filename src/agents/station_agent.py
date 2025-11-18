@@ -218,25 +218,28 @@ class StationAgent(BaseTransportAgent):
             
             # Find vehicles that can service this passenger's destination
             vehicle_agent = await self.get_vehicle_agent(vehicle_id)
-            if vehicle_agent:
-                # Send passenger request to vehicle
-                await self.send_message(
-                    vehicle_agent,
-                    {
-                        'passenger_id': passenger['id'],
-                        'origin': {'x': passenger['origin'].x, 'y': passenger['origin'].y},
-                        'destination': {'x': passenger['destination'].x, 'y': passenger['destination'].y},
-                        'target_arrival_time': (datetime.now() + timedelta(minutes=15)).isoformat()
-                    },
-                    MESSAGE_TYPES['PASSENGER_REQUEST']
-                )
-                
-                passengers_to_remove.append(passenger)
-                boarded_passengers += 1
-                self.total_passengers_served += 1
-                self.total_waiting_time += waiting_time
-                
-                print(f"✅ Passenger {passenger['id']} boarded {vehicle_id}")
+            if not vehicle_agent:
+                print(f"⚠️ Station {self.station_id} could not resolve JID for {vehicle_id}")
+                continue
+
+            # Send passenger request to vehicle
+            await self.send_message(
+                vehicle_agent,
+                {
+                    'passenger_id': passenger['id'],
+                    'origin': {'x': passenger['origin'].x, 'y': passenger['origin'].y},
+                    'destination': {'x': passenger['destination'].x, 'y': passenger['destination'].y},
+                    'target_arrival_time': (datetime.now() + timedelta(minutes=15)).isoformat()
+                },
+                MESSAGE_TYPES['PASSENGER_REQUEST']
+            )
+
+            passengers_to_remove.append(passenger)
+            boarded_passengers += 1
+            self.total_passengers_served += 1
+            self.total_waiting_time += waiting_time
+
+            print(f"✅ Passenger {passenger['id']} boarded {vehicle_id}")
         
         # Remove passengers who boarded or gave up
         for passenger in passengers_to_remove:
@@ -405,7 +408,7 @@ class StationAgent(BaseTransportAgent):
                 if getattr(agent, 'vehicle_id', None) == vehicle_id:
                     return str(agent.jid)
 
-        return f"{vehicle_id}@localhost"
+        return None
 
     async def get_nearby_vehicles(self) -> List[Tuple[str, str]]:
         """Get nearby vehicle IDs and JIDs"""

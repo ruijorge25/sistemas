@@ -37,6 +37,7 @@ class VehicleAgent(BaseTransportAgent):
         self.vehicle_type = vehicle_type  # 'bus' or 'tram'
         self.assigned_route = assigned_route
         self.city = city
+        self.agents_registry = None  # Injected by the coordinator so we can locate stations
         
         # Vehicle state
         self.current_position = assigned_route.stations[0] if assigned_route.stations else Position(0, 0)
@@ -253,14 +254,23 @@ class VehicleAgent(BaseTransportAgent):
                 MESSAGE_TYPES['VEHICLE_CAPACITY']
             )
         
-        # Move to next station in route
-        self.current_station_index = (self.current_station_index + 1) % len(self.assigned_route.stations)
-        self.next_station = self.assigned_route.stations[self.current_station_index]
-        
-        # Update estimated arrival time
-        distance_to_next = self.current_position.distance_to(self.next_station)
-        travel_time_minutes = (distance_to_next / SIMULATION_CONFIG['vehicle']['speed']) * 2
-        self.estimated_arrival_time = current_time + timedelta(minutes=travel_time_minutes)
+        # Update indices so we know where to head next
+        route_length = len(self.assigned_route.stations)
+        if route_length > 0:
+            try:
+                self.current_station_index = self.assigned_route.stations.index(self.current_position)
+            except ValueError:
+                self.current_station_index = 0
+
+        if route_length > 1:
+            next_index = (self.current_station_index + 1) % route_length
+            self.next_station = self.assigned_route.stations[next_index]
+            distance_to_next = self.current_position.distance_to(self.next_station)
+            travel_time_minutes = (distance_to_next / SIMULATION_CONFIG['vehicle']['speed']) * 2
+            self.estimated_arrival_time = current_time + timedelta(minutes=travel_time_minutes)
+        else:
+            self.next_station = None
+            self.estimated_arrival_time = current_time + timedelta(minutes=5)
     
     async def handle_passenger_alighting(self):
         """Handle passengers leaving the vehicle"""
@@ -285,39 +295,65 @@ class VehicleAgent(BaseTransportAgent):
         import json
         request_data = json.loads(msg.body)
         
-        if len(self.passengers) < self.capacity:
-            # Accept passenger
-            target_arrival_raw = request_data.get('target_arrival_time')
-            try:
-                target_arrival = datetime.fromisoformat(target_arrival_raw) if target_arrival_raw else None
-            except ValueError:
-                target_arrival = None
+        request_type = request_data.get('request_type', 'boarding_request')
+        available_capacity = self.capacity - len(self.passengers)
 
-            if target_arrival is None:
-                target_arrival = datetime.now() + timedelta(minutes=15)
-
-            passenger = PassengerInfo(
-                id=request_data['passenger_id'],
-                origin=Position(request_data['origin']['x'], request_data['origin']['y']),
-                destination=Position(request_data['destination']['x'], request_data['destination']['y']),
-                boarding_time=datetime.now(),
-                target_arrival_time=target_arrival
-            )
-            self.passengers.append(passenger)
-            
+        if request_type == 'availability_check':
+            response_payload = {
+                'vehicle_id': self.vehicle_id,
+                'available_capacity': max(0, available_capacity),
+                'estimated_arrival': self.estimated_arrival_time.isoformat() if self.estimated_arrival_time else None,
+                'vehicle_type': self.vehicle_type
+            }
             await self.send_message(
                 str(msg.sender),
-                {'status': 'accepted', 'vehicle_id': self.vehicle_id},
-                MESSAGE_TYPES['PASSENGER_REQUEST']
+                response_payload,
+                MESSAGE_TYPES['VEHICLE_CAPACITY']
             )
-            print(f"✅ {self.vehicle_id} accepted passenger {passenger.id}")
-        else:
-            # Reject passenger - vehicle full
+            return
+
+        if available_capacity <= 0:
             await self.send_message(
                 str(msg.sender),
                 {'status': 'rejected', 'reason': 'vehicle_full'},
                 MESSAGE_TYPES['PASSENGER_REQUEST']
             )
+            return
+
+        origin_data = request_data.get('origin')
+        destination_data = request_data.get('destination')
+        if not origin_data or not destination_data:
+            await self.send_message(
+                str(msg.sender),
+                {'status': 'rejected', 'reason': 'invalid_request'},
+                MESSAGE_TYPES['PASSENGER_REQUEST']
+            )
+            return
+
+        target_arrival_raw = request_data.get('target_arrival_time')
+        try:
+            target_arrival = datetime.fromisoformat(target_arrival_raw) if target_arrival_raw else None
+        except ValueError:
+            target_arrival = None
+
+        if target_arrival is None:
+            target_arrival = datetime.now() + timedelta(minutes=15)
+
+        passenger = PassengerInfo(
+            id=request_data.get('passenger_id', f"passenger_{len(self.passengers)}"),
+            origin=Position(origin_data['x'], origin_data['y']),
+            destination=Position(destination_data['x'], destination_data['y']),
+            boarding_time=datetime.now(),
+            target_arrival_time=target_arrival
+        )
+        self.passengers.append(passenger)
+
+        await self.send_message(
+            str(msg.sender),
+            {'status': 'accepted', 'vehicle_id': self.vehicle_id},
+            MESSAGE_TYPES['PASSENGER_REQUEST']
+        )
+        print(f"✅ {self.vehicle_id} accepted passenger {passenger.id}")
     
     async def handle_capacity_request(self, msg):
         """Handle station requests for additional capacity"""
@@ -391,9 +427,22 @@ class VehicleAgent(BaseTransportAgent):
     
     async def get_station_agents_at_position(self, position: Position) -> List[str]:
         """Get station agent JIDs at the given position"""
-        # This would be populated by the simulation coordinator
-        # For now, return empty list
-        return []
+        if not self.agents_registry:
+            return []
+
+        matches: List[str] = []
+        for agent_id, agent in self.agents_registry.items():
+            if not agent_id.startswith('station_'):
+                continue
+
+            station_pos = getattr(agent, 'position', None)
+            if not station_pos:
+                continue
+
+            if station_pos == position or station_pos.distance_to(position) <= 1:
+                matches.append(str(agent.jid))
+
+        return matches
     
     async def get_maintenance_agents(self) -> List[str]:
         """Get maintenance crew agent JIDs"""
