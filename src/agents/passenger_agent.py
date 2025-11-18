@@ -10,7 +10,6 @@ from .base_agent import BaseTransportAgent
 from ..environment.city import Position
 from ..config.settings import MESSAGE_TYPES, SIMULATION_CONFIG
 from ..protocols.contract_net import ContractNetInitiator
-from ..protocols.message_bus import message_bus
 
 class PassengerAgent(BaseTransportAgent):
     """Agent representing an individual passenger"""
@@ -23,7 +22,8 @@ class PassengerAgent(BaseTransportAgent):
         self.origin = origin
         self.destination = destination
         self.city = city
-        
+        self.agents_registry = None  # Filled by simulation coordinator
+
         # Passenger state
         self.current_position = origin
         self.state = 'waiting'  # waiting, traveling, arrived, gave_up
@@ -72,17 +72,22 @@ class PassengerAgent(BaseTransportAgent):
     
     class VehicleNegotiation(BaseTransportAgent.MessageReceiver):
         """Negotiate with vehicles for transportation"""
-        
+
         async def run(self):
+            subscription = self.agent.subscribe_to_messages([
+                MESSAGE_TYPES['VEHICLE_CAPACITY'],
+                MESSAGE_TYPES['PASSENGER_REQUEST'],
+            ])
             while True:
-                msg = await message_bus.receive_message(str(self.agent.jid), timeout=1)
-                if msg:
-                    msg_type = msg.get_metadata("type")
-                    if msg_type == MESSAGE_TYPES['VEHICLE_CAPACITY']:
-                        await self.agent.handle_vehicle_response(msg)
-                    elif msg_type == MESSAGE_TYPES['PASSENGER_REQUEST']:
-                        await self.agent.handle_booking_confirmation(msg)
-                await asyncio.sleep(0.1)
+                msg = await subscription.get()
+                if not msg:
+                    continue
+
+                msg_type = msg.get_metadata("type")
+                if msg_type == MESSAGE_TYPES['VEHICLE_CAPACITY']:
+                    await self.agent.handle_vehicle_response(msg)
+                elif msg_type == MESSAGE_TYPES['PASSENGER_REQUEST']:
+                    await self.agent.handle_booking_confirmation(msg)
     
     class PatienceMonitoring(BaseTransportAgent.MessageReceiver):
         """Monitor patience and give up if waiting too long"""
@@ -126,6 +131,12 @@ class PassengerAgent(BaseTransportAgent):
         # Request information from nearby vehicles
         nearby_vehicles = await self.get_nearby_vehicles()
         
+        if not nearby_vehicles:
+            print(f"⚠️ Passenger {self.passenger_id} found no nearby vehicles to contact")
+            return
+
+        target_arrival = (datetime.now() + self.max_waiting_time).isoformat()
+
         for vehicle_jid in nearby_vehicles:
             await self.send_message(
                 vehicle_jid,
@@ -135,7 +146,8 @@ class PassengerAgent(BaseTransportAgent):
                     'destination': {'x': self.destination.x, 'y': self.destination.y},
                     'request_type': 'availability_check',
                     'max_waiting_time': self.patience_time,
-                    'urgency': self.calculate_urgency()
+                    'urgency': self.calculate_urgency(),
+                    'target_arrival_time': target_arrival
                 },
                 MESSAGE_TYPES['PASSENGER_REQUEST']
             )
@@ -389,9 +401,25 @@ class PassengerAgent(BaseTransportAgent):
         await self.stop()
     
     async def get_nearby_vehicles(self) -> List[str]:
-        """Get nearby vehicle JIDs - would be provided by coordinator"""
-        # This will be populated by the simulation coordinator
-        return getattr(self, 'nearby_vehicles', [])
+        """Get nearby vehicle JIDs based on current city state"""
+        if not self.agents_registry:
+            return getattr(self, 'nearby_vehicles', [])
+
+        nearby = []
+        for agent_id, agent in self.agents_registry.items():
+            if not agent_id.startswith('vehicle_'):
+                continue
+
+            position = getattr(agent, 'current_position', None)
+            if not position:
+                continue
+
+            distance = self.current_position.distance_to(position)
+            nearby.append((distance, str(agent.jid)))
+
+        nearby.sort(key=lambda x: x[0])
+        # Only consider vehicles within a reasonable walking distance
+        return [jid for dist, jid in nearby if dist <= 12][:4]
     
     async def update_status(self):
         """Update passenger status metrics"""

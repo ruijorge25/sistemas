@@ -4,7 +4,7 @@ Station agents for bus stops and tram stations
 import asyncio
 import random
 from datetime import datetime, timedelta
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Tuple
 from collections import deque
 
 from .base_agent import BaseTransportAgent
@@ -12,18 +12,19 @@ from ..environment.city import Position
 from ..config.settings import MESSAGE_TYPES, SIMULATION_CONFIG
 from ..ml.learning import DemandPredictor, PatternRecognizer
 from ..protocols.contract_net import ContractNetInitiator
-from ..protocols.message_bus import message_bus
 
 class StationAgent(BaseTransportAgent):
     """Agent representing a bus stop or tram station"""
     
-    def __init__(self, jid: str, password: str, station_id: str, position: Position, 
-                 station_type: str = 'mixed'):
+    def __init__(self, jid: str, password: str, station_id: str, position: Position,
+                 station_type: str = 'mixed', city=None):
         super().__init__(jid, password, "station")
-        
+
         self.station_id = station_id
         self.position = position
         self.station_type = station_type  # 'bus', 'tram', or 'mixed'
+        self.city = city
+        self.agents_registry = None  # Injected externally so stations know other agents
         
         # Passenger queue management
         self.passenger_queue = deque()
@@ -100,15 +101,13 @@ class StationAgent(BaseTransportAgent):
     
     class VehicleMonitoring(BaseTransportAgent.MessageReceiver):
         """Monitor vehicle arrivals and capacity"""
-        
+
         async def run(self):
+            subscription = self.agent.subscribe_to_messages(MESSAGE_TYPES['VEHICLE_CAPACITY'])
             while True:
-                msg = await message_bus.receive_message(str(self.agent.jid), timeout=1)
+                msg = await subscription.get()
                 if msg:
-                    msg_type = msg.get_metadata("type")
-                    if msg_type == MESSAGE_TYPES['VEHICLE_CAPACITY']:
-                        await self.agent.handle_vehicle_arrival(msg)
-                await asyncio.sleep(0.1)
+                    await self.agent.handle_vehicle_arrival(msg)
     
     class DemandForecasting(BaseTransportAgent.MessageReceiver):
         """Forecast passenger demand and share with nearby stations"""
@@ -129,20 +128,23 @@ class StationAgent(BaseTransportAgent):
     
     class ContractNetHandler(BaseTransportAgent.MessageReceiver):
         """Handle Contract Net Protocol messages"""
-        
+
         async def run(self):
+            subscription = self.agent.subscribe_to_messages([
+                MESSAGE_TYPES['CONTRACT_NET_PROPOSE'],
+                MESSAGE_TYPES['CONTRACT_NET_INFORM'],
+            ])
             while True:
-                msg = await message_bus.receive_message(str(self.agent.jid), timeout=1)
-                if msg:
-                    msg_type = msg.metadata.get('type', '')
-                    
-                    if msg_type == MESSAGE_TYPES['CONTRACT_NET_PROPOSE']:
-                        # Received proposal from vehicle
-                        await self.agent.cnp_initiator.handle_proposal(msg)
-                    elif msg_type == MESSAGE_TYPES['CONTRACT_NET_INFORM']:
-                        # Contract execution completed
-                        await self.agent.handle_contract_completion(msg)
-                await asyncio.sleep(0.1)
+                msg = await subscription.get()
+                if not msg:
+                    continue
+
+                msg_type = msg.metadata.get('type', '')
+
+                if msg_type == MESSAGE_TYPES['CONTRACT_NET_PROPOSE']:
+                    await self.agent.cnp_initiator.handle_proposal(msg)
+                elif msg_type == MESSAGE_TYPES['CONTRACT_NET_INFORM']:
+                    await self.agent.handle_contract_completion(msg)
     
     async def add_passenger_to_queue(self):
         """Add a new passenger to the station queue"""
@@ -252,10 +254,22 @@ class StationAgent(BaseTransportAgent):
         
         # Get nearby vehicles as participants
         nearby_vehicles = await self.get_nearby_vehicles()
-        
+
         if not nearby_vehicles:
             print(f"❌ No vehicles available for CNP at station {self.station_id}")
             return
+
+        demand_payload = {
+            'station_id': self.station_id,
+            'position': {'x': self.position.x, 'y': self.position.y},
+            'queue_length': len(self.passenger_queue),
+            'predicted_demand': self.predicted_demand,
+            'urgency': 'high' if len(self.passenger_queue) > self.overcrowding_threshold else 'normal'
+        }
+
+        for vehicle_id, vehicle_jid in nearby_vehicles:
+            self.requested_vehicles.add(vehicle_id)
+            await self.send_message(vehicle_jid, demand_payload, MESSAGE_TYPES['STATION_DEMAND'])
         
         # Create task description for CNP
         task_description = {
@@ -268,11 +282,12 @@ class StationAgent(BaseTransportAgent):
         }
         
         # Initiate Contract Net Protocol
-        contract_id = await self.cnp_initiator.initiate_cfp(task_description, nearby_vehicles)
-        
+        participant_jids = [jid for _, jid in nearby_vehicles]
+        contract_id = await self.cnp_initiator.initiate_cfp(task_description, participant_jids)
+
         if contract_id:
             self.service_requests_sent += 1
-            print(f"📋 CNP initiated: {contract_id} with {len(nearby_vehicles)} vehicles")
+            print(f"📋 CNP initiated: {contract_id} with {len(participant_jids)} vehicles")
     
     async def handle_contract_completion(self, msg):
         """Handle notification of contract completion"""
@@ -282,9 +297,15 @@ class StationAgent(BaseTransportAgent):
         
         print(f"✅ Contract {contract_id} completed by {msg.sender}")
         self.service_requests_fulfilled += 1
-        
+
         # Remove vehicle from requested set
         vehicle_id = str(msg.sender).split('@')[0]
+        if self.agents_registry:
+            for agent in self.agents_registry.values():
+                if str(agent.jid) == str(msg.sender) and getattr(agent, 'vehicle_id', None):
+                    vehicle_id = agent.vehicle_id
+                    break
+
         if vehicle_id in self.requested_vehicles:
             self.requested_vehicles.remove(vehicle_id)
     
@@ -359,24 +380,73 @@ class StationAgent(BaseTransportAgent):
     
     async def get_possible_destinations(self) -> List[Position]:
         """Get list of possible destinations from this station"""
-        # This would be populated by the simulation coordinator
-        # For now, return empty list
-        return []
-    
+        if not self.city:
+            return []
+
+        destinations = set()
+        for route in self.city.routes:
+            if self.position in route.stations:
+                for station in route.stations:
+                    if station != self.position:
+                        destinations.add(station)
+
+        if not destinations:
+            destinations = {station for station in self.city.stations if station != self.position}
+
+        return list(destinations)
+
     async def get_vehicle_agent(self, vehicle_id: str) -> str:
         """Get vehicle agent JID by vehicle ID"""
-        # This would be maintained by the simulation coordinator
+        if self.agents_registry and vehicle_id in self.agents_registry:
+            return str(self.agents_registry[vehicle_id].jid)
+
+        if self.agents_registry:
+            for agent in self.agents_registry.values():
+                if getattr(agent, 'vehicle_id', None) == vehicle_id:
+                    return str(agent.jid)
+
         return f"{vehicle_id}@localhost"
-    
-    async def get_nearby_vehicles(self) -> List[str]:
-        """Get nearby vehicle agent JIDs"""
-        # This would be populated by the simulation coordinator
-        return []
-    
+
+    async def get_nearby_vehicles(self) -> List[Tuple[str, str]]:
+        """Get nearby vehicle IDs and JIDs"""
+        if not self.agents_registry:
+            return []
+
+        nearby = []
+        for agent_id, agent in self.agents_registry.items():
+            if not agent_id.startswith('vehicle_'):
+                continue
+
+            position = getattr(agent, 'current_position', None)
+            if not position:
+                continue
+
+            distance = self.position.distance_to(position)
+            vehicle_id = getattr(agent, 'vehicle_id', agent_id)
+            nearby.append((distance, vehicle_id, str(agent.jid)))
+
+        nearby.sort(key=lambda x: x[0])
+        return [(vehicle_id, jid) for dist, vehicle_id, jid in nearby if dist <= 10][:5]
+
     async def get_nearby_stations(self) -> List[str]:
         """Get nearby station agent JIDs"""
-        # This would be populated by the simulation coordinator
-        return []
+        if not self.agents_registry:
+            return []
+
+        nearby = []
+        for agent_id, agent in self.agents_registry.items():
+            if not agent_id.startswith('station_') or agent_id == self.station_id:
+                continue
+
+            other_pos = getattr(agent, 'position', None)
+            if not other_pos:
+                continue
+
+            distance = self.position.distance_to(other_pos)
+            if distance <= 8:
+                nearby.append(str(agent.jid))
+
+        return nearby
     
     async def update_status(self):
         """Update station status metrics"""

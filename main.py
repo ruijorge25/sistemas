@@ -207,7 +207,7 @@ async def create_spade_agents(city, base_manager, traffic_manager):
     # Create Station Agents
     for i, station_pos in enumerate(city.stations[:15]):
         jid = f"station{i}{xmpp_domain}"
-        agent = StationAgent(jid, password, f"station_{i}", station_pos)
+        agent = StationAgent(jid, password, f"station_{i}", station_pos, city=city)
         # Manually call setup to initialize behaviors WITHOUT starting XMPP connection
         await agent.setup()
         agents[f"station_{i}"] = agent
@@ -270,6 +270,11 @@ async def create_spade_agents(city, base_manager, traffic_manager):
     
     print(f"✅ Created {3} Maintenance Agents with behaviors")
     
+    # Provide registry references for agents that need global awareness
+    for agent in agents.values():
+        if hasattr(agent, 'agents_registry'):
+            agent.agents_registry = agents
+
     # Connect agents - give vehicles reference to maintenance crews
     maintenance_jids = [str(agents[f"maint_{i}"].jid) for i in range(3)]
     for agent_id, agent in agents.items():

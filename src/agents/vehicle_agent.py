@@ -14,7 +14,6 @@ from ..config.settings import MESSAGE_TYPES, SIMULATION_CONFIG
 from ..ml.learning import QLearningRouter, ReinforcementLearner
 from ..protocols.contract_net import ContractNetParticipant
 from .cooperation import VehicleCoordinator
-from ..protocols.message_bus import message_bus
 
 @dataclass
 class PassengerInfo:
@@ -132,23 +131,23 @@ class VehicleAgent(BaseTransportAgent):
     
     class PassengerManagement(BaseTransportAgent.MessageReceiver):
         """Manage passenger boarding and alighting"""
-        
+
         async def run(self):
+            subscription = self.agent.subscribe_to_messages(MESSAGE_TYPES['PASSENGER_REQUEST'])
             while True:
-                msg = await message_bus.receive_message(str(self.agent.jid), timeout=1)
-                if msg and msg.get_metadata("type") == MESSAGE_TYPES['PASSENGER_REQUEST']:
+                msg = await subscription.get()
+                if msg:
                     await self.agent.handle_passenger_request(msg)
-                await asyncio.sleep(0.1)
-    
+
     class CapacityNegotiation(BaseTransportAgent.MessageReceiver):
         """Negotiate with stations about capacity and routing"""
-        
+
         async def run(self):
+            subscription = self.agent.subscribe_to_messages(MESSAGE_TYPES['STATION_DEMAND'])
             while True:
-                msg = await message_bus.receive_message(str(self.agent.jid), timeout=1)
-                if msg and msg.get_metadata("type") == MESSAGE_TYPES['STATION_DEMAND']:
+                msg = await subscription.get()
+                if msg:
                     await self.agent.handle_capacity_request(msg)
-                await asyncio.sleep(0.1)
     
     class MaintenanceMonitoring(BaseTransportAgent.MessageReceiver):
         """Monitor vehicle health and request maintenance"""
@@ -169,23 +168,27 @@ class VehicleAgent(BaseTransportAgent):
     
     class ContractNetHandler(BaseTransportAgent.MessageReceiver):
         """Handle Contract Net Protocol messages"""
-        
+
         async def run(self):
+            subscription = self.agent.subscribe_to_messages([
+                MESSAGE_TYPES['CONTRACT_NET_CFP'],
+                MESSAGE_TYPES['CONTRACT_NET_ACCEPT'],
+                MESSAGE_TYPES['CONTRACT_NET_REJECT'],
+            ])
             while True:
-                msg = await message_bus.receive_message(str(self.agent.jid), timeout=1)
-                if msg:
-                    msg_type = msg.metadata.get('type', '')
-                    
-                    if msg_type == MESSAGE_TYPES['CONTRACT_NET_CFP']:
-                        # Received Call for Proposals
-                        await self.agent.cnp_participant.handle_cfp(msg)
-                    elif msg_type == MESSAGE_TYPES['CONTRACT_NET_ACCEPT']:
-                        # Contract awarded
-                        await self.agent.cnp_participant.handle_contract_result(msg)
-                    elif msg_type == MESSAGE_TYPES['CONTRACT_NET_REJECT']:
-                        # Contract rejected
-                        await self.agent.cnp_participant.handle_contract_result(msg)
-                await asyncio.sleep(0.1)
+                msg = await subscription.get()
+                if not msg:
+                    continue
+
+                msg_type = msg.metadata.get('type', '')
+
+                if msg_type == MESSAGE_TYPES['CONTRACT_NET_CFP']:
+                    await self.agent.cnp_participant.handle_cfp(msg)
+                elif msg_type in (
+                    MESSAGE_TYPES['CONTRACT_NET_ACCEPT'],
+                    MESSAGE_TYPES['CONTRACT_NET_REJECT'],
+                ):
+                    await self.agent.cnp_participant.handle_contract_result(msg)
     
     async def move_towards_next_station(self):
         """Move the vehicle towards its next station"""
@@ -284,12 +287,21 @@ class VehicleAgent(BaseTransportAgent):
         
         if len(self.passengers) < self.capacity:
             # Accept passenger
+            target_arrival_raw = request_data.get('target_arrival_time')
+            try:
+                target_arrival = datetime.fromisoformat(target_arrival_raw) if target_arrival_raw else None
+            except ValueError:
+                target_arrival = None
+
+            if target_arrival is None:
+                target_arrival = datetime.now() + timedelta(minutes=15)
+
             passenger = PassengerInfo(
                 id=request_data['passenger_id'],
                 origin=Position(request_data['origin']['x'], request_data['origin']['y']),
                 destination=Position(request_data['destination']['x'], request_data['destination']['y']),
                 boarding_time=datetime.now(),
-                target_arrival_time=datetime.fromisoformat(request_data['target_arrival_time'])
+                target_arrival_time=target_arrival
             )
             self.passengers.append(passenger)
             
@@ -314,7 +326,19 @@ class VehicleAgent(BaseTransportAgent):
         
         # Use coordination protocol to announce intention
         station_id = request_data.get('station_id', str(msg.sender))
-        await self.coordinator.announce_intention(self, station_id)
+        eta = self.estimated_arrival_time
+        current_pos = (self.current_position.x, self.current_position.y)
+        capacity_ratio = len(self.passengers) / self.capacity if self.capacity else 0
+        should_proceed, reason, alternative = self.coordinator.announce_intention(
+            self.vehicle_id, station_id, eta, current_pos, capacity_ratio
+        )
+
+        if not should_proceed:
+            if alternative:
+                print(f"🚦 {self.vehicle_id} skipping {station_id}, suggested to help {alternative} instead ({reason})")
+            else:
+                print(f"🚦 {self.vehicle_id} skipping {station_id} ({reason})")
+            return
         
         # Simple capacity sharing logic
         available_capacity = self.capacity - len(self.passengers)

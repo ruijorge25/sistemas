@@ -1,16 +1,19 @@
 """
 Base agent class for all transportation system agents
 """
+import asyncio
+import json
+from collections import defaultdict
+from datetime import datetime
+from typing import Any, Dict, Iterable, List
+
 import spade
 from spade.agent import Agent
 from spade.behaviour import CyclicBehaviour, OneShotBehaviour
 from spade.message import Message
 from spade.template import Template
-import json
-import asyncio
-from datetime import datetime
-from typing import Dict, Any, List
-from src.protocols.message_bus import message_bus, LocalMessage
+
+from src.protocols.message_bus import LocalMessage, message_bus
 
 class BaseTransportAgent(Agent):
     """Base class for all transportation system agents"""
@@ -21,31 +24,62 @@ class BaseTransportAgent(Agent):
         self.start_time = datetime.now()
         self.metrics = {}
         self.message_history = []
-        
+
+        # Local queues used in XMPP-less mode
+        self._log_queue: asyncio.Queue = asyncio.Queue()
+        self._message_subscribers = defaultdict(list)
+
         # Register with local message bus
         message_bus.register_agent(str(jid))
+        message_bus.register_callback(str(jid), self._handle_incoming_message)
         
     async def setup(self):
         """Setup the agent with basic behaviours"""
         print(f"🤖 {self.agent_type} agent {self.jid} starting...")
         
-        # Add message receiving behaviour
+        # Add message receiving behaviour (local mode)
         self.add_behaviour(self.MessageReceiver())
-        
+
         # Add periodic status update behaviour
         self.add_behaviour(self.StatusUpdater())
-    
+
+    async def _handle_incoming_message(self, msg: LocalMessage):
+        """Push incoming messages to local queues and notify subscribers."""
+        # Queue message for logging/metrics collection
+        await self._log_queue.put(msg)
+
+        # Deliver copies to subscribers by message type
+        msg_type = msg.get_metadata("type")
+        if msg_type and msg_type in self._message_subscribers:
+            for queue in list(self._message_subscribers[msg_type]):
+                await queue.put(msg)
+
+    def subscribe_to_messages(self, message_types: Iterable[str]):
+        """Create a subscription queue for specific message types."""
+        if isinstance(message_types, str):
+            message_types = [message_types]
+
+        queue: asyncio.Queue = asyncio.Queue()
+        for msg_type in message_types:
+            self._message_subscribers[msg_type].append(queue)
+        return queue
+
+    async def _get_logged_message(self, timeout: float = 1.0):
+        """Retrieve the next message for logging/handle_message."""
+        try:
+            return await asyncio.wait_for(self._log_queue.get(), timeout)
+        except asyncio.TimeoutError:
+            return None
+
     class MessageReceiver(CyclicBehaviour):
         """Handle incoming messages"""
-        
+
         async def run(self):
             while True:
-                # Use local message bus instead of SPADE
-                msg = await message_bus.receive_message(str(self.agent.jid), timeout=1)
+                msg = await self.agent._get_logged_message()
                 if msg:
                     await self.agent.handle_message(msg)
-                await asyncio.sleep(0.1)
-    
+
     class StatusUpdater(CyclicBehaviour):
         """Periodic status updates and maintenance"""
         
