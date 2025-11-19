@@ -1,5 +1,5 @@
 """
-Passenger agents - independent SPADE agents that make travel decisions
+Passenger agents - independent SPADE agents that make travel decisions - PURE SPADE
 """
 import asyncio
 import random
@@ -7,22 +7,24 @@ from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional
 
 from .base_agent import BaseTransportAgent
+from spade.behaviour import CyclicBehaviour
+from spade.message import Message
 from ..environment.city import Position
 from ..config.settings import MESSAGE_TYPES, SIMULATION_CONFIG
 from ..protocols.contract_net import ContractNetInitiator
-from ..protocols.message_bus import message_bus
 
 class PassengerAgent(BaseTransportAgent):
     """Agent representing an individual passenger"""
     
     def __init__(self, jid: str, password: str, passenger_id: str, 
-                 origin: Position, destination: Position, city):
+                 origin: Position, destination: Position, city, nearby_vehicles=None):
         super().__init__(jid, password, "passenger")
         
         self.passenger_id = passenger_id
         self.origin = origin
         self.destination = destination
         self.city = city
+        self.nearby_vehicles = nearby_vehicles or []  # Vehicle JIDs to negotiate with
         
         # Passenger state
         self.current_position = origin
@@ -48,6 +50,11 @@ class PassengerAgent(BaseTransportAgent):
         self.rejections_received = 0
         self.total_waiting_time = 0
         
+        # Counters for periodic tasks
+        self.route_discovery_counter = 0
+        self.patience_check_counter = 0
+        self.travel_check_counter = 0
+        
         # Contract Net Protocol
         self.cnp_initiator = ContractNetInitiator(self, cfp_timeout=5)
         
@@ -55,81 +62,87 @@ class PassengerAgent(BaseTransportAgent):
         """Setup passenger-specific behaviours"""
         await super().setup()
         
-        # Add passenger-specific behaviours
-        self.add_behaviour(self.RouteDiscovery())
-        self.add_behaviour(self.VehicleNegotiation())
-        self.add_behaviour(self.PatienceMonitoring())
-        self.add_behaviour(self.TravelMonitoring())
-        
-    class RouteDiscovery(BaseTransportAgent.MessageReceiver):
-        """Discover available routes and vehicles"""
-        
-        async def run(self):
-            while True:
-                if self.agent.state == 'waiting' and not self.agent.vehicle_proposals:
-                    await self.agent.discover_routes()
-                await asyncio.sleep(5)  # Check every 5 seconds
+        # Add unified behaviour for passenger operations
+        self.add_behaviour(self.PassengerMainBehaviour())
     
-    class VehicleNegotiation(BaseTransportAgent.MessageReceiver):
-        """Negotiate with vehicles for transportation"""
+    async def handle_message(self, msg: Message):
+        """
+        PURE SPADE message handler - routes incoming messages to appropriate handlers
+        """
+        await super().handle_message(msg)  # Log message
         
-        async def run(self):
-            subscription = self.agent.subscribe_to_messages([
-                MESSAGE_TYPES['VEHICLE_CAPACITY'],
-                MESSAGE_TYPES['PASSENGER_REQUEST']
-            ])
-            while True:
-                msg = await subscription.get()
-                if msg:
-                    msg_type = msg.get_metadata("type")
-                    if msg_type == MESSAGE_TYPES['VEHICLE_CAPACITY']:
-                        await self.agent.handle_vehicle_response(msg)
-                    elif msg_type == MESSAGE_TYPES['PASSENGER_REQUEST']:
-                        await self.agent.handle_booking_confirmation(msg)
+        msg_type = msg.metadata.get('type') if msg.metadata else None
+        
+        try:
+            import json
+            body = json.loads(msg.body) if isinstance(msg.body, str) else msg.body
+            
+            if msg_type == MESSAGE_TYPES.get('VEHICLE_CAPACITY'):
+                await self.handle_vehicle_response(body)
+            elif msg_type == MESSAGE_TYPES.get('PASSENGER_RESPONSE'):
+                await self.handle_booking_confirmation(body)
+            else:
+                print(f"⚠️ [passenger_{self.passenger_id}] Unknown message type: {msg_type}")
+        
+        except Exception as e:
+            print(f"❌ [passenger_{self.passenger_id}] Error handling message: {e}")
+            import traceback
+            traceback.print_exc()
     
-    class PatienceMonitoring(BaseTransportAgent.MessageReceiver):
-        """Monitor patience and give up if waiting too long"""
+    class PassengerMainBehaviour(CyclicBehaviour):
+        """
+        PURE SPADE: Unified behaviour for all passenger operations
+        - Messages received automatically via MessageReceiverBehaviour
+        - Discover routes periodically
+        - Monitor patience
+        - Track travel progress
+        """
         
         async def run(self):
+            tick_rate = SIMULATION_CONFIG['simulation']['time_step']
+            
             while True:
-                await asyncio.sleep(10)  # Check every 10 seconds
-                await self.agent.check_patience()
-    
-    class TravelMonitoring(BaseTransportAgent.MessageReceiver):
-        """Monitor travel progress"""
-        
-        async def run(self):
-            while True:
-                if self.agent.state == 'traveling':
-                    await self.agent.check_arrival()
-                await asyncio.sleep(5)
+                try:
+                    # STEP 1: Route discovery (periodic - every 25 ticks = ~5s)
+                    
+                    # STEP 2: Route discovery (periodic - every 25 ticks = ~5s)
+                    self.agent.route_discovery_counter += 1
+                    if self.agent.route_discovery_counter >= 25:
+                        if self.agent.state == 'waiting' and not self.agent.vehicle_proposals:
+                            await self.agent.discover_routes()
+                        self.agent.route_discovery_counter = 0
+                    
+                    # STEP 3: Patience check (every 50 ticks = ~10s)
+                    self.agent.patience_check_counter += 1
+                    if self.agent.patience_check_counter >= 50:
+                        await self.agent.check_patience()
+                        self.agent.patience_check_counter = 0
+                    
+                    # STEP 4: Travel monitoring (every 25 ticks = ~5s)
+                    self.agent.travel_check_counter += 1
+                    if self.agent.travel_check_counter >= 25:
+                        if self.agent.state == 'traveling':
+                            await self.agent.check_arrival()
+                        self.agent.travel_check_counter = 0
+                    
+                    await asyncio.sleep(tick_rate)
+                    
+                except Exception as e:
+                    print(f"❌ [passenger_{self.agent.passenger_id}] Error: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    await asyncio.sleep(1)
     
     async def discover_routes(self):
         """Discover available vehicles and routes - ACTIVELY compare multiple options"""
-        # Find nearest station to origin
-        origin_station = self.city.get_nearest_station(self.origin)
+        if not self.nearby_vehicles:
+            print(f"⚠️ Passenger {self.passenger_id} has no vehicles to contact")
+            return
         
-        # Get connecting routes to destination
-        dest_station = self.city.get_nearest_station(self.destination)
-        connecting_routes = self.city.get_route_by_stations(origin_station, dest_station)
+        print(f"🔍 Passenger {self.passenger_id} discovering routes...")
         
-        # IMPROVEMENT: Evaluate ALL possible routes, not just first
-        if connecting_routes:
-            route_scores = []
-            for route in connecting_routes:
-                score = self.evaluate_route_quality(route)
-                route_scores.append((route, score))
-                print(f"👤 Passenger {self.passenger_id} evaluating route {route.id}: score={score:.2f}")
-            
-            # Choose best route
-            route_scores.sort(key=lambda x: x[1], reverse=True)
-            self.preferred_route = route_scores[0][0]
-            print(f"✅ Passenger {self.passenger_id} selected route: {self.preferred_route.id}")
-        
-        # Request information from nearby vehicles
-        nearby_vehicles = await self.get_nearby_vehicles()
-        
-        for vehicle_jid in nearby_vehicles:
+        # Request information from all nearby vehicles
+        for vehicle_jid in self.nearby_vehicles:
             await self.send_message(
                 vehicle_jid,
                 {
@@ -143,36 +156,11 @@ class PassengerAgent(BaseTransportAgent):
                 MESSAGE_TYPES['PASSENGER_REQUEST']
             )
             self.requests_sent += 1
-    
-    def evaluate_route_quality(self, route) -> float:
-        """Evaluate quality of a route based on multiple factors"""
-        score = 0.0
         
-        # Factor 1: Number of stops (fewer is better)
-        num_stops = len(route.stations)
-        if num_stops <= 5:
-            score += 0.4
-        elif num_stops <= 8:
-            score += 0.3
-        else:
-            score += 0.1
-        
-        # Factor 2: Route popularity (from metrics if available)
-        route_efficiency = getattr(route, 'efficiency_rating', 0.5)
-        score += route_efficiency * 0.3
-        
-        # Factor 3: Distance directness
-        origin_station = self.city.get_nearest_station(self.origin)
-        dest_station = self.city.get_nearest_station(self.destination)
-        
-        if origin_station in route.stations and dest_station in route.stations:
-            # Check if route goes directly
-            origin_idx = route.stations.index(origin_station)
-            dest_idx = route.stations.index(dest_station)
-            if dest_idx > origin_idx:  # Right direction
-                score += 0.3
-        
-        return score
+        # Set decision deadline
+        if not self.decision_deadline:
+            self.decision_deadline = datetime.now() + timedelta(seconds=15)
+            asyncio.create_task(self.make_travel_decision())
     
     def calculate_urgency(self) -> float:
         """Calculate how urgent this passenger's request is"""
@@ -180,10 +168,13 @@ class PassengerAgent(BaseTransportAgent):
         urgency = min(1.0, waiting_time / self.patience_time)
         return urgency
     
-    async def handle_vehicle_response(self, msg):
+    async def handle_vehicle_response(self, body):
         """Handle response from a vehicle"""
         import json
-        response_data = json.loads(msg.body)
+        if isinstance(body, str):
+            response_data = json.loads(body)
+        else:
+            response_data = body
         
         vehicle_id = response_data.get('vehicle_id')
         available_capacity = response_data.get('available_capacity', 0)
@@ -195,29 +186,21 @@ class PassengerAgent(BaseTransportAgent):
                 'vehicle_id': vehicle_id,
                 'capacity': available_capacity,
                 'estimated_arrival': datetime.fromisoformat(estimated_arrival) if estimated_arrival else None,
-                'vehicle_jid': str(msg.sender),
+                'vehicle_jid': response_data.get('vehicle_jid', ''),
                 'received_at': datetime.now()
             }
             
-            print(f"👤 Passenger {self.passenger_id} received offer from {vehicle_id}")
-            
-            # Make decision after collecting offers
-            if not self.decision_deadline:
-                self.decision_deadline = datetime.now() + timedelta(seconds=10)
-                asyncio.create_task(self.make_travel_decision())
+            print(f"👤 Passenger {self.passenger_id} received offer from {vehicle_id} (capacity: {available_capacity})")
     
     async def make_travel_decision(self):
-        """Decide which vehicle to board based on collected proposals - ACTIVE COMPARISON"""
-        # Wait for deadline or until we have enough options
-        await asyncio.sleep(10)
+        """Decide which vehicle to board based on collected proposals"""
+        await asyncio.sleep(15)  # Wait for responses
         
         if not self.vehicle_proposals:
-            print(f"😞 Passenger {self.passenger_id} received no offers - trying alternative routes")
-            # IMPROVEMENT: Try alternative routes or longer wait
-            await self.try_alternative_routes()
+            print(f"😞 Passenger {self.passenger_id} received no offers - will retry")
+            self.decision_deadline = None
             return
         
-        # IMPROVEMENT: Compare ALL proposals with detailed logging
         print(f"🤔 Passenger {self.passenger_id} comparing {len(self.vehicle_proposals)} options:")
         
         ranked_options = []
@@ -225,30 +208,15 @@ class PassengerAgent(BaseTransportAgent):
             score = self.evaluate_vehicle_option(proposal)
             ranked_options.append((vehicle_id, proposal, score))
             
-            # Log comparison details
             wait_time = (proposal['estimated_arrival'] - datetime.now()).total_seconds() / 60 if proposal.get('estimated_arrival') else 999
             print(f"  - {vehicle_id}: score={score:.2f}, wait={wait_time:.1f}min, capacity={proposal.get('capacity', 0)}")
         
-        # Sort by score
         ranked_options.sort(key=lambda x: x[2], reverse=True)
         
         if ranked_options:
-            best_vehicle_id, best_vehicle, best_score = ranked_options[0]
+            best_vehicle_id, best_proposal, best_score = ranked_options[0]
             print(f"✅ Passenger {self.passenger_id} chose {best_vehicle_id} (score: {best_score:.2f})")
-            await self.request_boarding(best_vehicle)
-        
-    async def try_alternative_routes(self):
-        """Try finding alternative routes when first attempt fails"""
-        print(f"🔄 Passenger {self.passenger_id} searching for alternatives...")
-        
-        # Increase patience slightly
-        self.max_waiting_time += timedelta(minutes=5)
-        
-        # Reset and try again
-        self.vehicle_proposals = {}
-        self.decision_deadline = None
-        await asyncio.sleep(5)
-        await self.discover_routes()
+            await self.request_boarding(best_proposal)
     
     def evaluate_vehicle_option(self, proposal: Dict[str, Any]) -> float:
         """Evaluate a vehicle option and return a score"""
@@ -259,7 +227,6 @@ class PassengerAgent(BaseTransportAgent):
             arrival_time = proposal['estimated_arrival']
             wait_minutes = (arrival_time - datetime.now()).total_seconds() / 60
             
-            # Prefer vehicles arriving sooner
             if wait_minutes <= 2:
                 score += 0.5
             elif wait_minutes <= 5:
@@ -280,7 +247,6 @@ class PassengerAgent(BaseTransportAgent):
         received_at = proposal.get('received_at', datetime.now())
         response_time = (received_at - self.arrival_time).total_seconds()
         
-        # Prefer vehicles that responded quickly
         if response_time <= 30:
             score += 0.3
         elif response_time <= 60:
@@ -306,12 +272,15 @@ class PassengerAgent(BaseTransportAgent):
             MESSAGE_TYPES['PASSENGER_REQUEST']
         )
         
-        print(f"✅ Passenger {self.passenger_id} requesting boarding on {vehicle_proposal['vehicle_id']}")
+        print(f"📤 Passenger {self.passenger_id} requesting boarding on {vehicle_proposal['vehicle_id']}")
     
-    async def handle_booking_confirmation(self, msg):
+    async def handle_booking_confirmation(self, body):
         """Handle boarding confirmation or rejection"""
         import json
-        response_data = json.loads(msg.body)
+        if isinstance(body, str):
+            response_data = json.loads(body)
+        else:
+            response_data = body
         
         status = response_data.get('status')
         
@@ -325,7 +294,7 @@ class PassengerAgent(BaseTransportAgent):
             
             self.log_metric('waiting_time', waiting_time)
             
-            print(f"🎉 Passenger {self.passenger_id} boarded {self.current_vehicle}")
+            print(f"🎉 Passenger {self.passenger_id} boarded {self.current_vehicle} (waited {waiting_time:.1f}min)")
             
         elif status == 'rejected':
             self.rejections_received += 1
@@ -333,11 +302,10 @@ class PassengerAgent(BaseTransportAgent):
             
             print(f"❌ Passenger {self.passenger_id} rejected: {reason}")
             
-            # Try to find another vehicle
-            if self.rejections_received < 5:  # Don't give up too easily
+            # Try again
+            if self.rejections_received < 3:
                 self.vehicle_proposals = {}
                 self.decision_deadline = None
-                await self.discover_routes()
     
     async def check_patience(self):
         """Check if passenger has exceeded patience time"""
@@ -353,23 +321,19 @@ class PassengerAgent(BaseTransportAgent):
             print(f"😤 Passenger {self.passenger_id} gave up after {waiting_time.total_seconds()/60:.1f} minutes")
             
             self.log_metric('gave_up', 1)
-            
-            # Stop the agent
             await self.stop()
     
     async def check_arrival(self):
         """Check if passenger has arrived at destination"""
-        if self.state != 'traveling':
+        if self.state != 'traveling' or not self.boarding_time:
             return
         
-        # In a real implementation, this would check with the vehicle
-        # For now, we simulate arrival based on expected travel time
-        if self.boarding_time:
-            travel_time = datetime.now() - self.boarding_time
-            expected_travel = timedelta(minutes=10)  # Simplified
-            
-            if travel_time > expected_travel:
-                await self.arrive_at_destination()
+        # Simulate arrival after ~10 minutes of travel
+        travel_time = datetime.now() - self.boarding_time
+        expected_travel = timedelta(minutes=10)
+        
+        if travel_time > expected_travel:
+            await self.arrive_at_destination()
     
     async def arrive_at_destination(self):
         """Handle arrival at destination"""
@@ -377,9 +341,8 @@ class PassengerAgent(BaseTransportAgent):
         self.completion_time = datetime.now()
         self.current_position = self.destination
         
-        # Calculate satisfaction
         total_time = (self.completion_time - self.arrival_time).total_seconds() / 60
-        target_time = self.patience_time / 2  # Ideal time
+        target_time = self.patience_time / 2
         
         satisfaction = max(0, 1 - (total_time - target_time) / target_time) if target_time > 0 else 1
         
@@ -388,20 +351,4 @@ class PassengerAgent(BaseTransportAgent):
         
         print(f"🎯 Passenger {self.passenger_id} arrived! Total time: {total_time:.1f}min, Satisfaction: {satisfaction:.2f}")
         
-        # Stop the agent
         await self.stop()
-    
-    async def get_nearby_vehicles(self) -> List[str]:
-        """Get nearby vehicle JIDs - would be provided by coordinator"""
-        # This will be populated by the simulation coordinator
-        return getattr(self, 'nearby_vehicles', [])
-    
-    async def update_status(self):
-        """Update passenger status metrics"""
-        if self.state == 'waiting':
-            current_waiting = (datetime.now() - self.arrival_time).total_seconds() / 60
-            self.log_metric('current_waiting_time', current_waiting)
-        
-        self.log_metric('state', ['waiting', 'traveling', 'arrived', 'gave_up'].index(self.state))
-        self.log_metric('requests_sent', self.requests_sent)
-        self.log_metric('rejections_received', self.rejections_received)

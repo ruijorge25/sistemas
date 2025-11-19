@@ -1,34 +1,40 @@
 """
-Station agents for bus stops and tram stations
+Station agents for bus stops and tram stations - PURE SPADE
 """
 import asyncio
 import random
 from datetime import datetime, timedelta
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from collections import deque
 
 from .base_agent import BaseTransportAgent
+from spade.behaviour import CyclicBehaviour
+from spade.message import Message
 from ..environment.city import Position
-from ..config.settings import MESSAGE_TYPES, SIMULATION_CONFIG
+from ..config.settings import MESSAGE_TYPES, SIMULATION_CONFIG, DEBUG
 from ..ml.learning import DemandPredictor, PatternRecognizer
 from ..protocols.contract_net import ContractNetInitiator
-from ..protocols.message_bus import message_bus
 
 class StationAgent(BaseTransportAgent):
     """Agent representing a bus stop or tram station"""
     
     def __init__(self, jid: str, password: str, station_id: str, position: Position, 
-                 station_type: str = 'mixed'):
-        super().__init__(jid, password, "station")
+                 station_type: str = 'mixed', city=None, initial_passengers=0, metrics_collector=None, **kwargs):
+        super().__init__(jid, password, "station", metrics_collector=metrics_collector)
+        # Ignore kwargs like message_bus (we use global message_bus)
         
         self.station_id = station_id
         self.position = position
         self.station_type = station_type  # 'bus', 'tram', or 'mixed'
+        self.city = city  # Reference to city for getting other stations
         
-        # Passenger queue management
-        self.passenger_queue = deque()
+        # PASSO 5: Passenger queue management with structured dict
+        self.passenger_queue: list = []  # List of {"id": str, "destination": str, "arrival_time": datetime}
         self.max_queue_size = SIMULATION_CONFIG['station']['max_queue_size']
         self.overcrowding_threshold = SIMULATION_CONFIG['station']['overcrowding_threshold']
+        
+        # Populate initial passengers for realistic simulation
+        self.initial_passengers = initial_passengers
         
         # Demand forecasting
         self.demand_history = deque(maxlen=SIMULATION_CONFIG['station']['demand_forecast_window'])
@@ -57,93 +63,182 @@ class StationAgent(BaseTransportAgent):
         self.event_manager = None  # Will be set by coordinator
         self.demand_modifier = 1.0
         
+        # PassengerAgent integration (Phase 1.4)
+        self.passenger_agents = {}  # JID -> PassengerAgent instance
+        self.passenger_spawn_enabled = False  # Can be enabled for full agent-based modeling
+    
+    # ========================================
+    # PASSO 7: INVARIANTS
+    # ========================================
+    
+    def check_invariants(self):
+        """PASSO 7: Verify station invariants (only when DEBUG=True)"""
+        if not DEBUG:
+            return
+        
+        # Invariant 1: No duplicate passenger IDs in queue
+        seen_ids = set()
+        for passenger in self.passenger_queue:
+            pid = passenger.get("id")
+            assert pid not in seen_ids, \
+                f"[{self.station_id}] INVARIANT VIOLATION: passenger {pid} duplicated in queue"
+            seen_ids.add(pid)
+        
+        # Invariant 2: Queue size doesn't exceed max
+        assert len(self.passenger_queue) <= self.max_queue_size, \
+            f"[{self.station_id}] INVARIANT VIOLATION: queue size {len(self.passenger_queue)} > max {self.max_queue_size}"
+        
     async def setup(self):
         """Setup station-specific behaviours"""
         await super().setup()
         
-        # Add station-specific behaviours
-        self.add_behaviour(self.PassengerArrivalSimulation())
-        self.add_behaviour(self.VehicleMonitoring())
-        self.add_behaviour(self.DemandForecasting())
-        self.add_behaviour(self.ServiceRequestManagement())
-        self.add_behaviour(self.ContractNetHandler())
+        # Add unified behaviour for station operations
+        self.add_behaviour(self.StationMainBehaviour())
+    
+    async def handle_message(self, msg: Message):
+        """
+        PURE SPADE message handler - routes incoming messages to appropriate handlers
+        """
+        await super().handle_message(msg)
         
-    class PassengerArrivalSimulation(BaseTransportAgent.MessageReceiver):
-        """Simulate passenger arrivals - REACTS TO CONCERTS/EVENTS"""
+        msg_type = msg.metadata.get('type') if msg.metadata else None
+        
+        try:
+            import json
+            body = json.loads(msg.body) if isinstance(msg.body, str) else msg.body
+            
+            if msg_type == MESSAGE_TYPES['VEHICLE_ARRIVED']:
+                await self.handle_vehicle_arrived(body)
+            elif msg_type == MESSAGE_TYPES['CONTRACT_NET_PROPOSAL']:
+                await self.cnp_initiator.handle_proposal(msg)
+            elif msg_type == MESSAGE_TYPES['CONTRACT_NET_ACCEPT']:
+                await self.handle_contract_completion(msg)
+            elif msg_type == MESSAGE_TYPES['STATION_DEMAND']:
+                # Handle demand info from other stations (future enhancement)
+                pass
+            else:
+                print(f"⚠️ [{self.station_id}] Unknown message type: {msg_type}")
+        
+        except Exception as e:
+            print(f"❌ [{self.station_id}] Error handling message: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    class StationMainBehaviour(CyclicBehaviour):
+        """
+        PURE SPADE: Unified behaviour for all station operations
+        - Messages are received automatically via MessageReceiverBehaviour (base_agent)
+        - Generate passengers periodically
+        - Monitor demand and request vehicles if needed
+        """
         
         async def run(self):
+            tick_rate = SIMULATION_CONFIG['simulation']['time_step']
+            passenger_gen_counter = 0
+            demand_check_counter = 0
+            
             while True:
-                await asyncio.sleep(random.uniform(1, 3))  # Random arrival intervals
+                try:
+                    # STEP 1: Update station state
+                    self.agent.update_state()
+                    
+                    # STEP 2: Passenger generation (periodic)
+                    passenger_gen_counter += 1
+                    if passenger_gen_counter >= 10:  # Every ~2s with 0.2s tick
+                        await self.agent.add_passenger_to_queue()
+                        passenger_gen_counter = 0
+                    
+                    # STEP 3: Demand monitoring (periodic)
+                    demand_check_counter += 1
+                    if demand_check_counter >= 25:  # Every ~5s
+                        await self.agent.check_service_needs()
+                        demand_check_counter = 0
+                    
+                    await asyncio.sleep(tick_rate)
+                    
+                except Exception as e:
+                    print(f"❌ [{self.agent.station_id}] StationMainBehaviour error: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    await asyncio.sleep(1)
+    
+    # ========================================
+    # TICK-BASED STATE UPDATE
+    # ========================================
+    
+    def update_state(self):
+        """
+        Update station state every tick - AUTONOMOUS BEHAVIOR
+        Handles demand forecasting and service requests.
+        """
+        self.current_tick += 1
+        
+        # PASSO 7: Check invariants every 50 ticks (if DEBUG=True)
+        if DEBUG and self.current_tick % 50 == 0:
+            self.check_invariants()
+        
+        # Update demand forecast every 300 ticks (~30 seconds at 0.1s ticks)
+        if self.current_tick % 300 == 0:
+            self._update_demand_forecast_sync()
+            asyncio.create_task(self.share_demand_forecast())
+        
+        # Check service needs every 50 ticks (~5 seconds)
+        if self.current_tick % 50 == 0:
+            asyncio.create_task(self.check_service_needs())
+        
+        # Remove impatient passengers every 100 ticks (~10 seconds)
+        if self.current_tick % 100 == 0:
+            self._remove_impatient_passengers()
+    
+    def _update_demand_forecast_sync(self):
+        """Update demand forecast (synchronous version)"""
+        queue_size = len(self.passenger_queue)
+        self.current_demand = queue_size
+        self.demand_history.append(queue_size)
+        
+        # ML prediction
+        if self.ml_predictions_enabled and len(self.demand_history) > 5:
+            try:
+                history_list = list(self.demand_history)
+                predicted = self.demand_predictor.predict_next(history_list)
                 
-                # Check if new passengers arrive
-                arrival_rate = SIMULATION_CONFIG['passenger']['arrival_rate']
-                
-                # Adjust for rush hour
+                # Pattern recognition
                 current_hour = datetime.now().hour
-                rush_hours = SIMULATION_CONFIG['simulation']['rush_hours']
-                for start_hour, end_hour in rush_hours:
-                    if start_hour <= current_hour <= end_hour:
-                        arrival_rate *= SIMULATION_CONFIG['passenger']['rush_hour_multiplier']
-                        break
+                pattern_boost = self.pattern_recognizer.get_demand_boost(
+                    current_hour, 
+                    self.position.x, 
+                    self.position.y
+                )
                 
-                # IMPROVEMENT: Check for dynamic events (concerts, surges)
-                if self.agent.event_manager:
-                    pos = (self.agent.position.x, self.agent.position.y)
-                    self.agent.demand_modifier = self.agent.event_manager.get_demand_modifier(pos)
-                    arrival_rate *= self.agent.demand_modifier
-                    
-                    if self.agent.demand_modifier > 2.0:
-                        print(f"📈 Station {self.agent.station_id} experiencing {self.agent.demand_modifier:.1f}x demand surge!")
-                
-                if random.random() < arrival_rate:
-                    await self.agent.add_passenger_to_queue()
+                self.predicted_demand = predicted * pattern_boost
+            except Exception as e:
+                # Fallback to simple average
+                self.predicted_demand = sum(self.demand_history) / len(self.demand_history)
+        else:
+            # Simple average for fallback
+            if len(self.demand_history) > 0:
+                self.predicted_demand = sum(self.demand_history) / len(self.demand_history)
     
-    class VehicleMonitoring(BaseTransportAgent.MessageReceiver):
-        """Monitor vehicle arrivals and capacity"""
+    def _remove_impatient_passengers(self):
+        """Remove passengers who waited too long (synchronous)"""
+        now = datetime.now()
+        initial_size = len(self.passenger_queue)
+        passengers_to_remove = []
         
-        async def run(self):
-            subscription = self.agent.subscribe_to_messages([MESSAGE_TYPES['VEHICLE_CAPACITY']])
-            while True:
-                msg = await subscription.get()
-                if msg:
-                    await self.agent.handle_vehicle_arrival(msg)
+        for passenger in self.passenger_queue:
+            wait_time = (now - passenger['arrival_time']).total_seconds() / 60
+            if wait_time > passenger['patience_time']:
+                passengers_to_remove.append(passenger)
+        
+        for passenger in passengers_to_remove:
+            self.passenger_queue.remove(passenger)
+        
+        if passengers_to_remove:
+            print(f"⏰ Station {self.station_id}: {len(passengers_to_remove)} passengers left due to long wait")
     
-    class DemandForecasting(BaseTransportAgent.MessageReceiver):
-        """Forecast passenger demand and share with nearby stations"""
-        
-        async def run(self):
-            while True:
-                await asyncio.sleep(30)  # Update forecast every 30 seconds
-                await self.agent.update_demand_forecast()
-                await self.agent.share_demand_forecast()
-    
-    class ServiceRequestManagement(BaseTransportAgent.MessageReceiver):
-        """Manage requests for additional vehicle service"""
-        
-        async def run(self):
-            while True:
-                await asyncio.sleep(5)  # Check every 5 seconds
-                await self.agent.check_service_needs()
-    
-    class ContractNetHandler(BaseTransportAgent.MessageReceiver):
-        """Handle Contract Net Protocol messages"""
-        
-        async def run(self):
-            subscription = self.agent.subscribe_to_messages([
-                MESSAGE_TYPES['CONTRACT_NET_PROPOSE'],
-                MESSAGE_TYPES['CONTRACT_NET_INFORM']
-            ])
-            while True:
-                msg = await subscription.get()
-                if msg:
-                    msg_type = msg.metadata.get('type', '')
-                    
-                    if msg_type == MESSAGE_TYPES['CONTRACT_NET_PROPOSE']:
-                        # Received proposal from vehicle
-                        await self.agent.cnp_initiator.handle_proposal(msg)
-                    elif msg_type == MESSAGE_TYPES['CONTRACT_NET_INFORM']:
-                        # Contract execution completed
-                        await self.agent.handle_contract_completion(msg)
+    # ========================================
+    # PASSENGER & VEHICLE MANAGEMENT
+    # ========================================
     
     async def add_passenger_to_queue(self):
         """Add a new passenger to the station queue"""
@@ -197,6 +292,99 @@ class StationAgent(BaseTransportAgent):
         # Remove vehicle from requested list if it was requested
         self.requested_vehicles.discard(vehicle_id)
     
+    async def handle_vehicle_arrived(self, body):
+        """
+        PASSO 5: Handle VEHICLE_ARRIVED message from vehicle.
+        Strict capacity control - never send more passengers than vehicle can hold.
+        
+        Args:
+            body: {
+                "vehicle_id": str,
+                "station_id": str,
+                "capacity": int,
+                "occupancy": int,
+                "position": {"x": int, "y": int}
+            }
+        """
+        try:
+            # Parse JSON if body is a string
+            import json
+            if isinstance(body, str):
+                body = json.loads(body)
+            
+            vehicle_id = body["vehicle_id"]
+            station_id = body["station_id"]
+            capacity = body["capacity"]
+            occupancy = body["occupancy"]
+            
+            # PASSO 5: Calculate free capacity (strict)
+            free_capacity = max(0, capacity - occupancy)
+            
+            print(f"🚌 [{self.station_id}] Vehicle {vehicle_id} arrived | free={free_capacity}, queue={len(self.passenger_queue)}")
+            
+            # If no capacity or no passengers, send empty boarding list
+            if free_capacity <= 0:
+                print(f"⚠️ [{self.station_id}] Vehicle {vehicle_id} is FULL, no boarding")
+                return
+            
+            if len(self.passenger_queue) == 0:
+                print(f"ℹ️ [{self.station_id}] No passengers waiting")
+                return
+            
+            # PASSO 5: Select passengers to board (FIFO, respecting capacity)
+            boarding_count = min(free_capacity, len(self.passenger_queue))
+            boarding_passengers = []
+            
+            for _ in range(boarding_count):
+                if self.passenger_queue:
+                    passenger = self.passenger_queue.pop(0)  # REMOVE from queue! (FIFO)
+                    
+                    # PASSO 5: Record passenger served with waiting time
+                    if self.metrics_collector:
+                        waiting_time = (datetime.now() - passenger['arrival_time']).total_seconds() / 60  # minutes
+                        self.metrics_collector.record_passenger_served(self.station_id, waiting_time)
+                    
+                    # Convert Position to station_id if needed
+                    if isinstance(passenger.get('destination'), Position):
+                        dest_pos = passenger['destination']
+                        dest_id = self._get_station_id_at_position(dest_pos)
+                    else:
+                        dest_id = passenger.get('destination')
+                    
+                    boarding_passengers.append({
+                        "id": passenger['id'],
+                        "destination": dest_id
+                    })
+                    
+                    self.total_passengers_served += 1
+            
+            print(f"✅ [{self.station_id}] Boarding {len(boarding_passengers)} passengers to {vehicle_id}")
+            
+            # Send BOARDING_LIST to vehicle
+            vehicle_jid = self.city.get_vehicle_jid(vehicle_id)
+            await self.send_message(
+                vehicle_jid,
+                {
+                    "station_id": self.station_id,
+                    "passengers": boarding_passengers
+                },
+                MESSAGE_TYPES['BOARDING_LIST']
+            )
+            
+        except Exception as e:
+            print(f"❌ [{self.station_id}] Error handling vehicle arrival: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    def _get_station_id_at_position(self, position: Position) -> str:
+        """Map Position to station_id"""
+        if self.city and hasattr(self.city, 'stations'):
+            for idx, station_pos in enumerate(self.city.stations):
+                if station_pos.x == position.x and station_pos.y == position.y:
+                    return f"station_{idx}"
+        return f"station_at_{position.x}_{position.y}"
+
+    
     async def board_passengers(self, vehicle_id: str, available_capacity: int):
         """Board passengers onto an available vehicle"""
         boarded_passengers = 0
@@ -207,13 +395,14 @@ class StationAgent(BaseTransportAgent):
             if boarded_passengers >= available_capacity:
                 break
                 
-            # Check if passenger hasn't exceeded patience time
-            waiting_time = (datetime.now() - passenger['arrival_time']).total_seconds() / 60
-            if waiting_time > passenger['patience_time']:
-                # Passenger gave up waiting
-                passengers_to_remove.append(passenger)
-                print(f"😞 Passenger {passenger['id']} gave up waiting at station {self.station_id}")
-                continue
+            # Check if passenger hasn't exceeded patience time (if defined)
+            if 'patience_time' in passenger:
+                waiting_time = (datetime.now() - passenger['arrival_time']).total_seconds() / 60
+                if waiting_time > passenger['patience_time']:
+                    # Passenger gave up waiting
+                    passengers_to_remove.append(passenger)
+                    print(f"😞 Passenger {passenger['id']} gave up waiting at station {self.station_id}")
+                    continue
             
             # Find vehicles that can service this passenger's destination
             vehicle_agent = await self.get_vehicle_agent(vehicle_id)
@@ -235,12 +424,15 @@ class StationAgent(BaseTransportAgent):
                 self.total_passengers_served += 1
                 self.total_waiting_time += waiting_time
                 
-                print(f"✅ Passenger {passenger['id']} boarded {vehicle_id}")
+                print(f"👥 Passenger {passenger['id']} boarded {vehicle_id} at station {self.station_id}")
         
         # Remove passengers who boarded or gave up
         for passenger in passengers_to_remove:
             if passenger in self.passenger_queue:
                 self.passenger_queue.remove(passenger)
+        
+        if boarded_passengers > 0:
+            print(f"🚏 Station {self.station_id}: {boarded_passengers} passengers boarded {vehicle_id} (queue: {len(self.passenger_queue)} remaining)")
         
         self.current_demand = len(self.passenger_queue)
     
@@ -273,6 +465,9 @@ class StationAgent(BaseTransportAgent):
         
         if contract_id:
             self.service_requests_sent += 1
+            # PASSO 5: Record CNP activation
+            if self.metrics_collector:
+                self.metrics_collector.record_contract_net_activation(self.station_id, len(self.passenger_queue))
             print(f"📋 CNP initiated: {contract_id} with {len(nearby_vehicles)} vehicles")
     
     async def handle_contract_completion(self, msg):
@@ -360,24 +555,122 @@ class StationAgent(BaseTransportAgent):
     
     async def get_possible_destinations(self) -> List[Position]:
         """Get list of possible destinations from this station"""
-        # This would be populated by the simulation coordinator
-        # For now, return empty list
-        return []
+        if not self.city or not self.city.stations:
+            return []
+        
+        # Return all other stations as possible destinations
+        destinations = [s for s in self.city.stations if s != self.position]
+        return destinations
     
     async def get_vehicle_agent(self, vehicle_id: str) -> str:
         """Get vehicle agent JID by vehicle ID"""
-        # This would be maintained by the simulation coordinator
-        return f"{vehicle_id}@localhost"
+        # Convert vehicle_id to proper JID format
+        return f"{vehicle_id}@local"
     
     async def get_nearby_vehicles(self) -> List[str]:
-        """Get nearby vehicle agent JIDs"""
-        # This would be populated by the simulation coordinator
-        return []
+        """Get nearby vehicle agent JIDs using city's vehicle registry"""
+        if not hasattr(self, 'vehicle_registry') or not self.vehicle_registry:
+            return []
+        
+        # Use city's method to find vehicles within radius
+        radius = 10.0  # Search within 10 grid units
+        nearby_jids = self.city.get_vehicles_within_radius(
+            self.position, 
+            radius, 
+            self.vehicle_registry
+        )
+        
+        return nearby_jids
     
-    async def get_nearby_stations(self) -> List[str]:
-        """Get nearby station agent JIDs"""
-        # This would be populated by the simulation coordinator
-        return []
+    async def get_nearby_stations(self, radius: float = 15.0) -> List[str]:
+        """Get nearby station JIDs within radius for collaboration"""
+        try:
+            if not hasattr(self, 'city') or self.city is None:
+                return []
+            
+            nearby = []
+            
+            # Iterate through all city stations
+            for idx, station_pos in enumerate(self.city.stations):
+                # Calculate distance
+                distance = self.position.distance_to(station_pos)
+                
+                # Exclude self (distance=0) and stations beyond radius
+                if 0 < distance <= radius:
+                    # Generate station JID (format: station_N@localhost)
+                    station_jid = f"station_{idx}@localhost"
+                    
+                    # Don't include self
+                    if station_jid != str(self.jid):
+                        nearby.append((station_jid, distance))
+            
+            # Sort by distance
+            nearby.sort(key=lambda x: x[1])
+            
+            return [jid for jid, dist in nearby]
+            
+        except Exception as e:
+            # Silently handle - not critical for core functionality
+            return []
+    
+    async def spawn_passenger_agent(self, destination_station: Position) -> Optional['PassengerAgent']:
+        """
+        Spawn a PassengerAgent for realistic agent-based passenger modeling (Phase 1.4).
+        This enables passengers to actively negotiate and evaluate routes.
+        
+        Args:
+            destination_station: Position of destination station
+            
+        Returns:
+            PassengerAgent instance if spawning enabled, None otherwise
+        """
+        try:
+            if not self.passenger_spawn_enabled:
+                # Agent spawning disabled - use simple dict-based passengers
+                return None
+                
+            from src.agents.passenger_agent import PassengerAgent
+            import uuid
+            
+            # Create unique JID for passenger
+            passenger_id = f"passenger_{uuid.uuid4().hex[:8]}"
+            passenger_jid = f"{passenger_id}@localhost"
+            
+            # Create passenger agent
+            passenger = PassengerAgent(
+                jid=passenger_jid,
+                password="passenger_pass",
+                passenger_id=passenger_id,
+                origin=self.position,
+                destination=destination_station,
+                city=self.city
+            )
+            
+            # Start the agent
+            await passenger.start(auto_register=True)
+            self.passenger_agents[passenger_jid] = passenger
+            
+            self.log(f"Spawned PassengerAgent {passenger_id} going to ({destination_station.x},{destination_station.y})", "info")
+            return passenger
+            
+        except Exception as e:
+            self.log(f"Error spawning passenger agent: {e}", "error")
+            import traceback
+            traceback.print_exc()
+            return None
+    
+    async def enable_passenger_agents(self, enable: bool = True):
+        """
+        Enable/disable PassengerAgent spawning for agent-based passenger modeling.
+        When disabled (default), uses simple dict-based passengers.
+        When enabled, spawns actual PassengerAgent instances.
+        
+        Args:
+            enable: True to enable agent-based passengers, False for dict-based
+        """
+        self.passenger_spawn_enabled = enable
+        status = "ENABLED" if enable else "DISABLED"
+        self.log(f"PassengerAgent spawning {status}", "info")
     
     async def update_status(self):
         """Update station status metrics"""

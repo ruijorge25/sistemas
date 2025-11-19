@@ -24,9 +24,41 @@ class Route:
     id: str
     stations: List[Position]
     vehicle_type: str  # 'bus' or 'tram'
+    
+    def __init__(self, *args, **kwargs):
+        """Dual-mode constructor for backward compatibility
+        
+        Supports:
+        - Route(id, stations, vehicle_type) - full specification
+        - Route(stations) - minimal (for tests/validator)
+        """
+        # Case 1: Route(id, stations, vehicle_type)
+        if len(args) == 3 and isinstance(args[1], list):
+            self.id = args[0]
+            self.stations = args[1]
+            self.vehicle_type = args[2]
+        # Case 2: Route(stations) - for tests
+        elif len(args) == 1 and isinstance(args[0], list):
+            self.id = "route_anon"
+            self.stations = args[0]
+            self.vehicle_type = kwargs.get("vehicle_type", "bus")
+        # Case 3: Route(id=..., stations=..., vehicle_type=...) - kwargs
+        else:
+            self.id = kwargs.get("id", "route_anon")
+            self.stations = kwargs.get("stations", [])
+            self.vehicle_type = kwargs.get("vehicle_type", "bus")
 
 class City:
-    def __init__(self, config: dict):
+    def __init__(self, config: dict = None):
+        """Initialize city with optional config (defaults for backward compatibility)"""
+        if config is None:
+            # Default configuration for tests/validator
+            config = {
+                'name': 'Test City',
+                'grid_size': (100, 100),
+                'num_stations': 15
+            }
+        
         self.name = config['name']
         self.grid_size = config['grid_size']
         self.stations = []
@@ -142,3 +174,90 @@ class City:
     def get_station_type(self, position: Position) -> str:
         """Get the type of station at a position"""
         return self.station_types.get(position, 'mixed')
+    
+    def add_station(self, position: Position, station_type: str = 'mixed'):
+        """Add a station to the city (for tests/validators)"""
+        if position not in self.stations:
+            self.stations.append(position)
+            self.station_types[position] = station_type
+    
+    def get_weather_impact(self) -> float:
+        """Get current weather impact multiplier on speed/breakdowns"""
+        if self.weather_active:
+            return 0.7  # 30% slower in bad weather
+        return 1.0
+    
+    def get_vehicles_within_radius(self, position: Position, radius: float, vehicle_registry: dict) -> List[str]:
+        """
+        Find all vehicles within a given radius of a position.
+        
+        Args:
+            position: Center position to search from
+            radius: Search radius in grid units
+            vehicle_registry: Dict mapping vehicle_id -> vehicle_agent reference
+        
+        Returns:
+            List of vehicle JIDs (strings) within the radius
+        """
+        vehicles_in_range = []
+        
+        for vehicle_id, vehicle_agent in vehicle_registry.items():
+            # Calculate distance from position to vehicle's current position
+            distance = position.distance_to(vehicle_agent.current_position)
+            
+            # Include vehicles within radius that are not broken
+            if distance <= radius and not vehicle_agent.is_broken:
+                vehicles_in_range.append(str(vehicle_agent.jid))
+        
+        return vehicles_in_range
+    
+    def get_station_jid(self, station_id: str) -> str:
+        """
+        Map station_id to JID for messaging.
+        
+        Args:
+            station_id: Station identifier (e.g., 'station_3')
+            
+        Returns:
+            JID string (e.g., 'station3@local')
+        """
+        # Extract number from station_id (handles 'station_3' or 'station3')
+        import re
+        match = re.search(r'\d+', station_id)
+        if match:
+            num = match.group()
+            return f"station{num}@local"
+        return f"{station_id}@local"
+    
+    def get_vehicle_jid(self, vehicle_id: str) -> str:
+        """
+        Map vehicle_id to JID for messaging.
+        
+        Args:
+            vehicle_id: Vehicle identifier (e.g., 'vehicle_1')
+            
+        Returns:
+            JID string (e.g., 'vehicle1@local')
+        """
+        # Extract number from vehicle_id
+        import re
+        match = re.search(r'\d+', vehicle_id)
+        if match:
+            num = match.group()
+            return f"vehicle{num}@local"
+        return f"{vehicle_id}@local"
+    
+    def get_passenger_jid(self, passenger_id: str) -> str:
+        """
+        Map passenger_id to JID for messaging.
+        
+        Args:
+            passenger_id: Passenger identifier
+            
+        Returns:
+            JID string
+        """
+        # Passenger IDs can be complex, just ensure @local suffix
+        if '@' not in passenger_id:
+            return f"{passenger_id}@local"
+        return passenger_id

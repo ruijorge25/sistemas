@@ -1,115 +1,115 @@
 """
-Base agent class for all transportation system agents
+Base agent class for all transportation system agents - PURE SPADE
 """
 import asyncio
 import json
-from collections import defaultdict
 from datetime import datetime
-from typing import Any, Dict, Iterable, List
+from typing import Any, Dict
+from collections import deque
 
-import spade
 from spade.agent import Agent
-from spade.behaviour import CyclicBehaviour, OneShotBehaviour
+from spade.behaviour import CyclicBehaviour
 from spade.message import Message
-from spade.template import Template
+
+from ..config.settings import MESSAGE_TYPES
+
+# Simple LOCAL message router for simulation without XMPP server
+_local_queues = {}
 
 class BaseTransportAgent(Agent):
-    """Base class for all transportation system agents"""
+    """
+    Base class for all transportation system agents.
+    PURE SPADE with simple local routing for simulation mode.
+    """
     
-    def __init__(self, jid: str, password: str, agent_type: str):
+    def __init__(self, jid: str, password: str, agent_type: str, metrics_collector=None):
         super().__init__(jid, password)
         self.agent_type = agent_type
         self.start_time = datetime.now()
         self.metrics = {}
         self.message_history = []
-
-        # Subscription queues for behaviors
-        self._log_queue: asyncio.Queue = asyncio.Queue()
-        self._message_subscribers = defaultdict(list)
+        self.current_tick = 0
         
+        # PASSO 5: Metrics collector reference
+        self.metrics_collector = metrics_collector
+        
+        # Register local queue for simulation mode
+        if str(jid) not in _local_queues:
+            _local_queues[str(jid)] = deque(maxlen=1000)
+    
     async def setup(self):
-        """Setup the agent with basic behaviours"""
-        print(f"🤖 {self.agent_type} agent {self.jid} starting...")
+        """Setup the agent with SPADE message receiver behaviour"""
+        print(f"🤖 {self.agent_type} agent {self.jid} starting with PURE SPADE...")
         
-        # Add message receiving behaviour
-        self.add_behaviour(self.MessageReceiver())
-
-        # Add periodic status update behaviour
-        self.add_behaviour(self.StatusUpdater())
-
-    async def _handle_incoming_message(self, msg: Message):
-        """Push incoming messages to local queues and notify subscribers."""
-        # Queue message for logging/metrics collection
-        await self._log_queue.put(msg)
-
-        # Deliver copies to subscribers by message type
-        msg_type = msg.get_metadata("type")
-        if msg_type and msg_type in self._message_subscribers:
-            for queue in list(self._message_subscribers[msg_type]):
-                await queue.put(msg)
-
-    def subscribe_to_messages(self, message_types: Iterable[str]):
-        """Create a subscription queue for specific message types."""
-        if isinstance(message_types, str):
-            message_types = [message_types]
-
-        queue: asyncio.Queue = asyncio.Queue()
-        for msg_type in message_types:
-            self._message_subscribers[msg_type].append(queue)
-        return queue
-
-    async def _get_logged_message(self, timeout: float = 1.0):
-        """Retrieve the next message for logging/handle_message."""
-        try:
-            return await asyncio.wait_for(self._log_queue.get(), timeout)
-        except asyncio.TimeoutError:
-            return None
+        # Add universal SPADE message receiver
+        self.add_behaviour(self.MessageReceiverBehaviour())
     
-    class MessageReceiver(CyclicBehaviour):
-        """Handle incoming XMPP messages and route to subscribers"""
-
+    class MessageReceiverBehaviour(CyclicBehaviour):
+        """
+        Universal message receiver - works with or without XMPP
+        """
         async def run(self):
-            # Receive XMPP message with timeout
-            msg = await self.receive(timeout=1)
+            msg = None
+            
+            try:
+                # FORCE LOCAL MODE - always use _local_queues (no XMPP server)
+                jid = str(self.agent.jid)
+                if jid in _local_queues and len(_local_queues[jid]) > 0:
+                    msg = _local_queues[jid].popleft()
+                    # DEBUG
+                    msg_type = msg.metadata.get('type') if msg.metadata else None
+                    if msg_type == MESSAGE_TYPES.get('BREAKDOWN_ALERT'):
+                        print(f"🔍 RECEIVE DEBUG: {jid} popped BREAKDOWN_ALERT from queue, remaining: {len(_local_queues[jid])}")
+            except Exception as e:
+                print(f"❌ MessageReceiver error for {self.agent.jid}: {e}")
+                jid = str(self.agent.jid)
+                if jid in _local_queues and len(_local_queues[jid]) > 0:
+                    msg = _local_queues[jid].popleft()
+            
             if msg:
-                # Route to subscribers via callback
-                await self.agent._handle_incoming_message(msg)
-                # Also handle in main handler for logging
                 await self.agent.handle_message(msg)
-    
-    class StatusUpdater(CyclicBehaviour):
-        """Periodic status updates and maintenance"""
-        
-        async def run(self):
-            while True:
-                await asyncio.sleep(5)  # Update every 5 seconds
-                await self.agent.update_status()
+            
+            await asyncio.sleep(0.1)
     
     async def handle_message(self, msg: Message):
-        """Handle incoming messages - to be implemented by subclasses"""
+        """
+        Handle incoming SPADE messages - MUST BE OVERRIDDEN in subclasses.
+        This is the MAIN entry point for all messages.
+        """
         self.message_history.append({
             'timestamp': datetime.now(),
             'sender': str(msg.sender),
             'body': msg.body,
-            'metadata': msg.metadata
+            'metadata': dict(msg.metadata) if msg.metadata else {}
         })
-        print(f"📨 {self.agent_type} {self.jid} received message from {msg.sender}")
-    
-    async def update_status(self):
-        """Update agent status - to be implemented by subclasses"""
-        pass
     
     async def send_message(self, to: str, content: Dict[Any, Any], message_type: str):
-        """Send a message to another agent via XMPP"""
-        # Create SPADE message
+        """
+        Send SPADE message with local routing fallback
+        
+        Args:
+            to: Recipient JID
+            content: Message content dict (will be JSON serialized)
+            message_type: Message type from MESSAGE_TYPES
+        """
         msg = Message(to=to)
         msg.set_metadata("type", message_type)
         msg.body = json.dumps(content)
+        msg.sender = str(self.jid)
         
-        # Send via SPADE/XMPP
-        await self.send(msg)
-        
-        print(f"📤 {self.agent_type} {self.jid} sent {message_type} to {to}")
+        try:
+            # FORCE LOCAL MODE - always use _local_queues
+            if to not in _local_queues:
+                _local_queues[to] = deque(maxlen=1000)
+            _local_queues[to].append(msg)
+            # DEBUG
+            if message_type == MESSAGE_TYPES.get('BREAKDOWN_ALERT'):
+                print(f"🔍 SEND DEBUG: Added BREAKDOWN_ALERT to queue for {to}, queue size now: {len(_local_queues[to])}")
+        except Exception as e:
+            print(f"❌ Error sending message: {e}")
+            if to not in _local_queues:
+                _local_queues[to] = deque(maxlen=1000)
+            _local_queues[to].append(msg)
     
     def log_metric(self, metric_name: str, value: float):
         """Log a performance metric"""
@@ -119,3 +119,7 @@ class BaseTransportAgent(Agent):
             'timestamp': datetime.now(),
             'value': value
         })
+    
+    async def update_status(self):
+        """Update agent status - to be implemented by subclasses"""
+        pass

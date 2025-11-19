@@ -29,6 +29,11 @@ class EventManager:
         self.event_history = []
         self.event_counter = 0
         
+        # PASSO 6: Global state for interface control
+        self.global_traffic_level = 1.0  # 1.0 = normal, 2.0 = very heavy, 0.5 = light
+        self.station_demand_multipliers = {}  # {station_id: {"factor": float, "remaining_ticks": int|None}}
+        self.current_tick = 0  # For tracking event timers
+        
     def create_concert_event(self, location: Tuple[int, int], 
                             attendees: int = 500) -> DynamicEvent:
         """Create a concert ending event - sudden passenger surge"""
@@ -166,33 +171,53 @@ class EventManager:
         return affected, max_intensity
     
     def get_traffic_modifier(self, location: Tuple[int, int]) -> float:
-        """Get speed modifier for vehicle at location (1.0 = normal, <1.0 = slower)"""
+        """
+        Get speed modifier for vehicle at location (1.0 = normal, <1.0 = slower).
+        PASSO 6: Now considers global_traffic_level from interface.
+        """
+        # Start with global traffic level
+        base_modifier = 1.0 / self.global_traffic_level  # 2.0 traffic → 0.5 speed
+        
+        # Check local traffic jams
         affected, intensity = self.is_location_affected(location, "traffic_jam")
         
         if affected:
             # Traffic reduces speed: intensity 1.0 = 30% speed, 0.5 = 65% speed
-            return 1.0 - (intensity * 0.7)
+            local_modifier = 1.0 - (intensity * 0.7)
+            base_modifier = min(base_modifier, local_modifier)  # Take worst
         
         # Check weather
         affected_weather, weather_intensity = self.is_location_affected(location, "weather")
         if affected_weather:
-            return 1.0 - (weather_intensity * 0.5)
+            weather_modifier = 1.0 - (weather_intensity * 0.5)
+            base_modifier = min(base_modifier, weather_modifier)
         
-        return 1.0  # Normal speed
+        return base_modifier
     
-    def get_demand_modifier(self, location: Tuple[int, int]) -> float:
-        """Get passenger demand modifier at location (1.0 = normal, >1.0 = surge)"""
+    def get_demand_modifier(self, location: Tuple[int, int], station_id: str = None) -> float:
+        """
+        Get passenger demand modifier at location (1.0 = normal, >1.0 = surge).
+        PASSO 6: Now considers station_demand_multipliers from interface.
+        """
+        base_modifier = 1.0
+        
+        # PASSO 6: Check station-specific demand multiplier (from interface)
+        if station_id and station_id in self.station_demand_multipliers:
+            base_modifier = self.station_demand_multipliers[station_id]["factor"]
+        
         # Check for concert events
         affected_concert, concert_intensity = self.is_location_affected(location, "concert")
         if affected_concert:
-            return 1.0 + (concert_intensity * 10.0)  # Up to 11x demand!
+            concert_modifier = 1.0 + (concert_intensity * 10.0)  # Up to 11x demand!
+            base_modifier = max(base_modifier, concert_modifier)  # Take highest
         
         # Check for demand surge
         affected_surge, surge_intensity = self.is_location_affected(location, "demand_surge")
         if affected_surge:
-            return 1.0 + (surge_intensity * 3.0)  # Up to 4x demand
+            surge_modifier = 1.0 + (surge_intensity * 3.0)  # Up to 4x demand
+            base_modifier = max(base_modifier, surge_modifier)
         
-        return 1.0  # Normal demand
+        return base_modifier
     
     def is_route_blocked(self, location: Tuple[int, int]) -> bool:
         """Check if route is blocked by accident"""
@@ -213,6 +238,69 @@ class EventManager:
         
         for event in expired:
             self.active_events.remove(event)
+    
+    # ========================================
+    # PASSO 6: Interface Control Methods
+    # ========================================
+    
+    def set_global_traffic(self, level: float):
+        """
+        Set global traffic level (called by interface buttons).
+        
+        Args:
+            level: 1.0 = normal, 2.0 = heavy traffic, 0.5 = light traffic
+        """
+        old_level = self.global_traffic_level
+        self.global_traffic_level = max(0.1, level)  # Prevent zero
+        
+        if old_level != level:
+            print(f"🚦 PASSO 6: Global traffic changed: {old_level:.1f} → {level:.1f}")
+    
+    def set_station_demand_multiplier(self, station_id: str, factor: float, 
+                                     duration_ticks: int = None):
+        """
+        Set demand multiplier for specific station (called by interface buttons).
+        
+        Args:
+            station_id: ID of the station
+            factor: Demand multiplier (1.0 = normal, 3.0 = concert, etc.)
+            duration_ticks: How many ticks this lasts (None = indefinite)
+        """
+        self.station_demand_multipliers[station_id] = {
+            "factor": factor,
+            "remaining_ticks": duration_ticks
+        }
+        
+        duration_str = f"{duration_ticks} ticks" if duration_ticks else "indefinite"
+        print(f"📊 PASSO 6: Station {station_id} demand: {factor:.1f}x ({duration_str})")
+    
+    def clear_station_demand_multiplier(self, station_id: str):
+        """Remove demand multiplier for station (back to normal)"""
+        if station_id in self.station_demand_multipliers:
+            del self.station_demand_multipliers[station_id]
+            print(f"✅ PASSO 6: Station {station_id} demand back to normal")
+    
+    def tick_environment(self):
+        """
+        PASSO 6: Tick environment timers (should be called every simulation tick).
+        Decrements remaining_ticks for timed events and removes expired ones.
+        """
+        self.current_tick += 1
+        
+        expired_stations = []
+        
+        for station_id, info in self.station_demand_multipliers.items():
+            if info["remaining_ticks"] is not None:
+                info["remaining_ticks"] -= 1
+                
+                if info["remaining_ticks"] <= 0:
+                    expired_stations.append(station_id)
+        
+        # Remove expired demand multipliers
+        for station_id in expired_stations:
+            factor = self.station_demand_multipliers[station_id]["factor"]
+            del self.station_demand_multipliers[station_id]
+            print(f"⏰ PASSO 6: Station {station_id} demand event expired (was {factor:.1f}x)")
     
     def get_active_events_summary(self) -> Dict[str, Any]:
         """Get summary of active events"""

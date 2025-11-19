@@ -1,31 +1,45 @@
 """
 Route optimization and dynamic adaptation for vehicles
+Enhanced with A*, fleet rebalancing, and multi-modal routing
 """
 import asyncio
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional, Tuple, Set
 from datetime import datetime, timedelta
 from collections import deque
+import heapq
 
 from ..environment.city import Position, Route
 
 class RouteOptimizer:
-    """Optimizes and adapts vehicle routes dynamically"""
+    """
+    Advanced route optimizer with A* pathfinding, traffic avoidance,
+    and dynamic fleet rebalancing
+    """
     
     def __init__(self, city):
         self.city = city
         self.route_cache = {}  # Cache of calculated routes
+        self.rebalancing_active = False
+        self.overcrowded_threshold = 15  # passengers
         
     def calculate_optimal_route(self, start: Position, end: Position, 
-                              current_traffic: Dict[Position, float]) -> List[Position]:
-        """Calculate optimal route considering traffic using A* algorithm"""
+                              current_traffic: Dict[Position, float] = None) -> List[Position]:
+        """
+        Calculate optimal route using A* algorithm with traffic consideration
+        Returns list of positions from start to end avoiding high traffic
+        """
+        if current_traffic is None:
+            current_traffic = self.city.traffic_conditions
         
-        # A* pathfinding
+        # A* pathfinding with traffic weights
         def heuristic(pos1: Position, pos2: Position) -> float:
+            """Euclidean distance heuristic"""
             return pos1.distance_to(pos2)
         
         def get_neighbors(pos: Position) -> List[Position]:
-            """Get valid neighboring positions"""
+            """Get valid neighboring positions (8-directional)"""
             neighbors = []
+            # 8 directions: N, S, E, W, NE, NW, SE, SW
             for dx, dy in [(0, 1), (1, 0), (0, -1), (-1, 0), (1, 1), (-1, -1), (1, -1), (-1, 1)]:
                 new_x = pos.x + dx
                 new_y = pos.y + dy
@@ -35,22 +49,42 @@ class RouteOptimizer:
             
             return neighbors
         
-        def get_cost(pos: Position) -> float:
-            """Get movement cost considering traffic"""
-            base_cost = 1.0
-            traffic_level = current_traffic.get(pos, 0.5)
-            return base_cost * (1 + traffic_level * 2)  # Traffic increases cost up to 3x
+        def get_cost(from_pos: Position, to_pos: Position) -> float:
+            """
+            Get movement cost considering:
+            - Base distance
+            - Traffic level (0.0 = clear, 1.0 = jammed)
+            - Weather conditions
+            """
+            base_cost = from_pos.distance_to(to_pos)
+            
+            # Traffic penalty (up to 3x cost)
+            traffic_level = current_traffic.get(to_pos, 0.5)
+            traffic_multiplier = 1 + (traffic_level * 2)
+            
+            # Weather penalty
+            weather_multiplier = self.city.get_weather_impact(to_pos)
+            
+            return base_cost * traffic_multiplier * weather_multiplier
         
-        # A* implementation
-        open_set = {start}
+        # A* implementation with priority queue
+        open_set = []
+        heapq.heappush(open_set, (0, start))
         came_from = {}
         
         g_score = {start: 0}
         f_score = {start: heuristic(start, end)}
         
+        visited = set()
+        
         while open_set:
             # Get node with lowest f_score
-            current = min(open_set, key=lambda pos: f_score.get(pos, float('inf')))
+            current_f, current = heapq.heappop(open_set)
+            
+            if current in visited:
+                continue
+            
+            visited.add(current)
             
             if current == end:
                 # Reconstruct path
@@ -62,18 +96,21 @@ class RouteOptimizer:
                 path.reverse()
                 return path
             
-            open_set.remove(current)
-            
             for neighbor in get_neighbors(current):
-                tentative_g_score = g_score[current] + get_cost(neighbor)
+                if neighbor in visited:
+                    continue
+                
+                tentative_g_score = g_score[current] + get_cost(current, neighbor)
                 
                 if neighbor not in g_score or tentative_g_score < g_score[neighbor]:
                     came_from[neighbor] = current
                     g_score[neighbor] = tentative_g_score
-                    f_score[neighbor] = tentative_g_score + heuristic(neighbor, end)
-                    
-                    if neighbor not in open_set:
-                        open_set.add(neighbor)
+                    f = tentative_g_score + heuristic(neighbor, end)
+                    f_score[neighbor] = f
+                    heapq.heappush(open_set, (f, neighbor))
+        
+        # No path found, return direct line
+        return [start, end]
         
         # No path found, return direct line
         return [start, end]
@@ -325,4 +362,111 @@ class DynamicRouteAdapter:
             'total_adaptations': len(self.adaptation_history),
             'last_adaptation': self.last_adaptation_time.isoformat() if self.last_adaptation_time else None,
             'adaptations': list(self.adaptation_history)
+        }
+
+
+class FleetRebalancer:
+    """
+    Advanced fleet rebalancing system
+    Dynamically redistributes vehicles based on demand patterns
+    """
+    
+    def __init__(self, city, route_optimizer: RouteOptimizer):
+        self.city = city
+        self.optimizer = route_optimizer
+        self.rebalancing_active = False
+        self.overcrowded_threshold = 15
+        self.rebalancing_history = deque(maxlen=100)
+        
+    def detect_overcrowded_stations(self, stations: List[Any]) -> List[Tuple[Any, int]]:
+        """Detect stations with excessive passenger queues"""
+        overcrowded = []
+        
+        for station in stations:
+            if hasattr(station, 'passenger_queue'):
+                queue_size = len(station.passenger_queue)
+                if queue_size > self.overcrowded_threshold:
+                    overcrowded.append((station, queue_size))
+        
+        overcrowded.sort(key=lambda x: x[1], reverse=True)
+        return overcrowded
+    
+    def find_idle_vehicles(self, vehicles: List[Any]) -> List[Any]:
+        """Find vehicles available for redeployment"""
+        idle = []
+        
+        for vehicle in vehicles:
+            if hasattr(vehicle, 'is_broken') and vehicle.is_broken:
+                continue
+            
+            if hasattr(vehicle, 'passengers'):
+                passenger_count = len(vehicle.passengers)
+                capacity = getattr(vehicle, 'capacity', 60)
+                
+                if passenger_count < capacity * 0.3:
+                    idle.append(vehicle)
+        
+        return idle
+    
+    async def rebalance_fleet(self, stations: List[Any], vehicles: List[Any]) -> Dict[str, Any]:
+        """
+        Dynamically rebalance fleet by redirecting idle vehicles to overcrowded stations
+        """
+        if self.rebalancing_active:
+            return {'status': 'already_running'}
+        
+        self.rebalancing_active = True
+        
+        try:
+            overcrowded = self.detect_overcrowded_stations(stations)
+            idle_vehicles = self.find_idle_vehicles(vehicles)
+            
+            actions = []
+            
+            for station, queue_size in overcrowded:
+                if not idle_vehicles:
+                    break
+                
+                station_pos = station.current_position if hasattr(station, 'current_position') else station.position
+                
+                nearest_vehicle = min(idle_vehicles, 
+                                     key=lambda v: v.current_position.distance_to(station_pos))
+                
+                optimal_route = self.optimizer.calculate_optimal_route(
+                    nearest_vehicle.current_position,
+                    station_pos,
+                    self.city.traffic_conditions
+                )
+                
+                action = {
+                    'vehicle_id': nearest_vehicle.vehicle_id,
+                    'from_position': (nearest_vehicle.current_position.x, nearest_vehicle.current_position.y),
+                    'to_station': station.station_id if hasattr(station, 'station_id') else str(station_pos),
+                    'queue_size': queue_size,
+                    'route_length': len(optimal_route),
+                    'timestamp': datetime.now().isoformat()
+                }
+                
+                actions.append(action)
+                idle_vehicles.remove(nearest_vehicle)
+                self.rebalancing_history.append(action)
+                
+                print(f"🔄 REBALANCING: {nearest_vehicle.vehicle_id} → {action['to_station']} (queue: {queue_size})")
+            
+            return {
+                'status': 'success',
+                'actions_taken': len(actions),
+                'overcrowded_stations': len(overcrowded),
+                'idle_vehicles_found': len(idle_vehicles) + len(actions),
+                'actions': actions
+            }
+        
+        finally:
+            self.rebalancing_active = False
+    
+    def get_rebalancing_stats(self) -> Dict[str, Any]:
+        """Get rebalancing statistics"""
+        return {
+            'total_rebalancing_actions': len(self.rebalancing_history),
+            'recent_actions': list(self.rebalancing_history)[-10:]
         }

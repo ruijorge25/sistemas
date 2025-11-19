@@ -1,5 +1,8 @@
 # Configuration for the Multi-Agent Transportation System
 
+# PASSO 7: Debug flag for invariant checking
+DEBUG = False  # Set to True to enable invariant checks (slower but safer)
+
 # XMPP Server Configuration
 XMPP_CONFIG = {
     'server': 'localhost',
@@ -20,11 +23,11 @@ SIMULATION_CONFIG = {
     'vehicle': {
         'bus_capacity': 60,  # passengers per bus
         'tram_capacity': 40,  # passengers per tram
-        'fuel_capacity': 100,
+        'fuel_capacity': 100,  # 0-100% fuel system
         'fuel_consumption_per_cell': 1,  # 1 unit per cell moved
-        'fuel_consumption_rate': 0.5,  # fuel per movement
-        'speed': 1,  # grid units per time unit
-        'breakdown_probability': 0.02,  # 2% per check - REALISTIC RATE
+        'fuel_consumption_rate': 0.05,  # fuel per movement (REDUCED for longer runtime)
+        'speed': 0.5,  # grid units per time unit
+        'breakdown_probability': 0.05,  # 5% per check
         'overcrowding_penalty_bus': 50,  # passengers > this = penalty
         'overcrowding_penalty_tram': 35  # passengers > this = penalty
     },
@@ -35,7 +38,7 @@ SIMULATION_CONFIG = {
     },
     'passenger': {
         'patience_time': 15,  # max waiting time
-        'arrival_rate': 0.8,  # passengers per time unit per station (INCREASED for visible activity)
+        'arrival_rate': 0.4,  # passengers per time unit per station (BALANCED for slower pace)
         'rush_hour_multiplier': 3.0
     },
     'maintenance': {
@@ -51,7 +54,7 @@ SIMULATION_CONFIG = {
         'base_tow_hooks': 2  # total tow hooks at maintenance base
     },
     'simulation': {
-        'time_step': 1.0,  # seconds per simulation step
+        'time_step': 2.0,  # seconds per simulation step (SLOWED for visual tracking)
         'max_duration': 3600,  # maximum simulation time
         'rush_hours': [(7, 9), (17, 19)],  # (start, end) hours
         'log_level': 'INFO'
@@ -77,16 +80,22 @@ XMPP_CONFIG = {
 # Message types for agent communication
 MESSAGE_TYPES = {
     'PASSENGER_REQUEST': 'passenger_request',
-    'VEHICLE_CAPACITY': 'vehicle_capacity',
+    'PASSENGER_RESPONSE': 'passenger_response',  # 🆕 Vehicle → Passenger response
+    'VEHICLE_CAPACITY': 'vehicle_capacity',      # 🆕 Vehicle → Passenger availability
+    'VEHICLE_ARRIVED': 'vehicle_arrived',
+    'BOARDING_LIST': 'boarding_list',
+    'BOARDING_CONFIRMED': 'boarding_confirmed',
+    'TRIP_COMPLETED': 'trip_completed',
     'STATION_DEMAND': 'station_demand',
     'BREAKDOWN_ALERT': 'breakdown_alert',
     'MAINTENANCE_REQUEST': 'maintenance_request',
+    'MAINTENANCE_COMPLETED': 'maintenance_completed',
     'ROUTE_UPDATE': 'route_update',
-    'CONTRACT_NET_CFP': 'cfp',  # Call for Proposals
-    'CONTRACT_NET_PROPOSE': 'propose',
+    'CONTRACT_NET_CFP': 'cfp',
+    'CONTRACT_NET_PROPOSAL': 'proposal',
     'CONTRACT_NET_ACCEPT': 'accept',
     'CONTRACT_NET_REJECT': 'reject',
-    'CONTRACT_NET_INFORM': 'inform',  # Inform about contract execution
+    'CONTRACT_NET_INFORM': 'inform',
     'RETURN_TO_BASE': 'return_to_base',
     'DEPLOY_FROM_BASE': 'deploy_from_base'
 }

@@ -1,17 +1,16 @@
 """
-Contract Net Protocol implementation for agent coordination
+Contract Net Protocol implementation for agent coordination - PURE SPADE
 """
 import asyncio
 import json
 from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional
 from spade.message import Message
-from spade.behaviour import CyclicBehaviour
 
 from ..config.settings import MESSAGE_TYPES
 
 class ContractNetInitiator:
-    """Contract Net Protocol Initiator (e.g., Station requesting service)"""
+    """Contract Net Protocol Initiator (e.g., Station requesting service) - PURE SPADE"""
     
     def __init__(self, agent, cfp_timeout: int = 30):
         self.agent = agent
@@ -20,7 +19,7 @@ class ContractNetInitiator:
         
     async def initiate_cfp(self, task_description: Dict[str, Any], 
                           participants: List[str]) -> Optional[str]:
-        """Initiate Call for Proposals"""
+        """Initiate Call for Proposals using PURE SPADE messaging"""
         contract_id = f"contract_{datetime.now().timestamp()}"
         
         cfp_data = {
@@ -39,7 +38,7 @@ class ContractNetInitiator:
             'deadline': datetime.now() + timedelta(seconds=self.cfp_timeout)
         }
         
-        # Send CFP to all participants
+        # Send CFP to all participants using SPADE send_message
         for participant in participants:
             await self.agent.send_message(
                 participant,
@@ -87,7 +86,7 @@ class ContractNetInitiator:
             contract_info = self.active_contracts[contract_id]
             contract_info['proposals'][str(msg.sender)] = proposal_data
             
-            print(f"📝 Received proposal from {msg.sender} for contract {contract_id}")
+            # Silently collect proposals
     
     async def evaluate_proposals(self, proposals: Dict[str, Any], 
                                task: Dict[str, Any]) -> Optional[str]:
@@ -140,13 +139,16 @@ class ContractNetInitiator:
         contract_info = self.active_contracts[contract_id]
         winning_proposal = contract_info['proposals'][winner]
         
+        # Add initiator JID to task for contract execution
+        task_with_initiator = {**contract_info['task'], 'initiator': str(self.agent.jid)}
+        
         # Send acceptance to winner
         await self.agent.send_message(
             winner,
             {
                 'contract_id': contract_id,
                 'status': 'accepted',
-                'task': contract_info['task']
+                'task': task_with_initiator  # Include initiator JID
             },
             MESSAGE_TYPES['CONTRACT_NET_ACCEPT']
         )
@@ -182,7 +184,7 @@ class ContractNetParticipant:
         contract_id = cfp_data['contract_id']
         task = cfp_data['task']
         
-        print(f"📋 Received CFP {contract_id} from {msg.sender}")
+        # Silently received CFP
         
         # Evaluate if we can/want to bid on this task
         can_bid = await self.can_perform_task(task)
@@ -226,10 +228,10 @@ class ContractNetParticipant:
         await self.agent.send_message(
             initiator,
             proposal,
-            MESSAGE_TYPES['CONTRACT_NET_PROPOSE']
+            MESSAGE_TYPES['CONTRACT_NET_PROPOSAL']
         )
         
-        print(f"📤 Submitted proposal for contract {proposal['contract_id']}")
+        print(f"📤 Proposal submitted for contract {proposal.get('contract_id')} to {initiator}")
     
     async def handle_contract_result(self, msg: Message):
         """Handle contract acceptance or rejection"""
@@ -244,8 +246,7 @@ class ContractNetParticipant:
                 print(f"🎉 Contract {contract_id} accepted!")
                 # Start performing the task
                 await self.execute_contract(contract_id, result_data.get('task', {}))
-            else:
-                print(f"❌ Contract {contract_id} rejected")
+            # Silently ignore rejects - normal operation
     
     async def execute_contract(self, contract_id: str, task: Dict[str, Any]):
         """Execute the awarded contract"""
